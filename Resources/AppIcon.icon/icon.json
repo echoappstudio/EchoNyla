@@ -1,28 +1,20 @@
 {
   "fill" : {
     "linear-gradient" : [
-      "srgb:0.94510,0.94902,0.95686,1.00000",
-      "srgb:0.74510,0.76471,0.79216,1.00000"
+      "srgb:0.10196,0.10588,0.11765,1.00000",
+      "srgb:0.01961,0.02353,0.02745,1.00000"
     ]
   },
   "groups" : [
     {
       "layers" : [
         {
-          "image-name" : "lip.png",
-          "name" : "lip"
-        },
-        {
-          "image-name" : "chevron.png",
-          "name" : "chevron"
-        },
-        {
           "glass" : true,
-          "image-name" : "glass.png",
-          "name" : "glass"
+          "image-name" : "glyph.png",
+          "name" : "glyph"
         }
       ],
-      "name" : "Tile",
+      "name" : "Glyph",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5
@@ -30,39 +22,8 @@
       "specular" : true,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.15
+        "value" : 0.2
       }
-    },
-    {
-      "layers" : [
-        {
-          "image-name" : "slot.png",
-          "name" : "slot"
-        }
-      ],
-      "name" : "Slot"
-    },
-    {
-      "layers" : [
-        {
-          "image-name" : "ticks.png",
-          "name" : "ticks"
-        },
-        {
-          "image-name" : "chamber.png",
-          "name" : "chamber"
-        }
-      ],
-      "name" : "Dial"
-    },
-    {
-      "layers" : [
-        {
-          "image-name" : "bezel.png",
-          "name" : "bezel"
-        }
-      ],
-      "name" : "Bezel"
     }
   ],
   "supported-platforms" : {

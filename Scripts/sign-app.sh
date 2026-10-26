@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Signs Levant.app from the inside out: Sparkle's helpers, then Sparkle, then the app itself.
+# Signs EchoNyla.app from the inside out: Sparkle's helpers, then Sparkle, then the app itself.
 # SIGN_MODE is adhoc (the default), self-signed or developer-id; SIGN_IDENTITY is the
 # certificate's SHA-1 for the last two. Developer ID adds the hardened runtime and a timestamp,
 # which notarization needs.
 set -euo pipefail
 
-APP="${1:?usage: sign-app.sh <path to Levant.app>}"
+APP="${1:?usage: sign-app.sh <path to EchoNyla.app>}"
 MODE="${SIGN_MODE:-adhoc}"
 IDENTITY="${SIGN_IDENTITY:--}"
 

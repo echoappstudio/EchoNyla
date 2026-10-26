@@ -48,7 +48,7 @@ class ChecksumSidecarTests(unittest.TestCase):
             root = Path(temporary)
             dist = root / "dist"
             dist.mkdir()
-            zip_path = dist / "Levant-2.4.1.zip"
+            zip_path = dist / "EchoNyla-3.0.0.zip"
             zip_path.write_bytes(b"test archive payload\n")
 
             result = subprocess.run(

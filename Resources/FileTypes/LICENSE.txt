@@ -1,0 +1,12 @@
+File type icons
+
+These icons come from vscode-icons (https://github.com/vscode-icons/vscode-icons),
+copyright The vscode-icons Contributors and the respective brand owners. The project
+states that its icons are licensed under Creative Commons Attribution-ShareAlike 4.0
+(https://creativecommons.org/licenses/by-sa/4.0/) and that branded icons keep their
+owners' copyright license. They were converted from the original SVG artwork to
+256 x 256 PNG files and renamed; the artwork itself is unchanged.
+
+Mac file types (Pages, Numbers, Keynote, Mail, Calendar, Contacts, apps, ICNS, PLIST,
+aliases and unknown files) are not included here: EchoNyla shows them with the
+artwork macOS itself provides on this Mac.

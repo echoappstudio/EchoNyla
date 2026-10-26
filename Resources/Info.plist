@@ -5,19 +5,19 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>Levant</string>
+    <string>EchoNyla</string>
     <key>CFBundleIdentifier</key>
-    <string>com.echoapps.levant</string>
+    <string>com.echoapps.echonyla</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Levant</string>
+    <string>EchoNyla</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.8.0</string>
+    <string>3.0.0</string>
     <key>CFBundleVersion</key>
-    <string>15</string>
+    <string>16</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
@@ -25,9 +25,11 @@
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>Levant watches your Desktop for new files (like screenshots) and files them on this Mac.</string>
+    <string>EchoNyla watches your Desktop for new files (like screenshots) and files them on this Mac.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>EchoNyla looks at the folders in Documents to suggest favorite folders, only when you open the setup helper.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>Levant watches Downloads for new files, files them on this Mac, and helps clean up old ones.</string>
+    <string>EchoNyla watches Downloads for new files, files them on this Mac, and helps clean up old ones.</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -35,7 +37,7 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>SUFeedURL</key>
-    <string>https://github.com/echoappstudio/Levant/releases/latest/download/appcast.xml</string>
+    <string>https://github.com/echoappstudio/EchoNyla/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>XbrkJTaPzhNpqefpNzb+rr0Rwe+AP5R0B4o+gv3Aur0=</string>
     <key>SUEnableAutomaticChecks</key>

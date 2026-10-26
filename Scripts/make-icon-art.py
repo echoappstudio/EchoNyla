@@ -1,374 +1,163 @@
 #!/usr/bin/env python3
-"""Draws Levant's icon: the layers of Resources/AppIcon.icon, the flat 1024px fallback
-(Resources/AppIcon-1024.png and docs/images/levant-icon.png) and one Dock icon per skin
-(Resources/SkinIcons/icon-<skin>.png).
+"""Draws EchoNyla's icon: a silver page with a chevron dropping into a silver tray, on Verbyn's black tile.
 
-Developer tool, not part of CI. Needs Pillow and numpy:  python3 Scripts/make-icon-art.py
+The skins and their colours are Verbyn's (Scripts/make-skin-icons.py there): Signature is the app's
+built-in icon (black tile, silver glyph, near-black chevron); the other five recolour the same drawing
+(the skin's dark tile, the glyph in the skin's bright gradient, a white chevron).
 
-The design ("Oyster Steel"): a polished steel bezel around a dial with a fine minute track and
-baton hour markers; a document slides into a tray slot under a chevron. The default icon is the
-Oyster skin (white dial, steel bezel, navy chevron); the other skins recolour the same drawing.
+Writes, from the repository root:
+    Resources/AppIcon.icon/Assets/glyph.png   the page and tray alone, for Icon Composer (macOS draws the tile)
+    Resources/AppIcon-1024.png                Signature edge to edge with no shadow (the .icns fallback)
+    docs/images/echonyla-icon.png             the same, for the README
+    Resources/SkinIcons/icon-<skin>.png       the Dock and Finder icon of every other skin (824 tile, soft shadow)
 
-macOS draws the outer rounded shape, shadow and shine itself, so the layers are drawn on a full
-1024x1024 canvas: the tile colour is the .icon's `fill`, and the layers sit on top of it. In icon.json
-the FIRST group and FIRST layer are the FRONT-most. This script composites them back to front.
+Run by hand after changing the art (needs Pillow and numpy); not run in CI:
+    python3 Scripts/make-icon-art.py
 """
-from __future__ import annotations
-
-import json
-import math
-from pathlib import Path
+import pathlib
 
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
-ROOT = Path(__file__).resolve().parent.parent
-ICON = ROOT / "Resources" / "AppIcon.icon"
-ASSETS = ICON / "Assets"
-SKIN_ICONS = ROOT / "Resources" / "SkinIcons"
-S = 1024
-SS = 2  # supersampling for shapes
-C = S / 2
-K = 1024 / 824  # the concept was drawn on an 824 tile; the .icon canvas is the whole tile
-
-# Back to front. Also the order the layers are drawn in the flat icons.
-BACK_TO_FRONT = ["bezel", "chamber", "ticks", "slot", "glass", "chevron", "lip"]
-
-# name: tile top, tile bottom, bezel light/mid/dark, dial centre/edge colours, dial rim, tick, baton,
-# slot, document fill (r, g, b, a), document edge, chevron. "marked" adds a dive bezel with minute marks.
-SKINS: dict[str, dict] = {
-    "slate": dict(bg=("#2E343A", "#111417"), bezel=("#F4F6F8", "#AAB2BC", "#6A7480"), dial=("#2F353C", "#0F1215"),
-                  rim="#8C96A2", tick="#D5DCE3", baton="#E6EBF0", slot="#06080A", doc=(255, 255, 255, 26),
-                  docedge="#D5DCE3", chev="#A9C2DA"),
-    "oyster": dict(bg=("#F1F2F4", "#BEC3CA"), bezel=("#FFFFFF", "#B7BDC6", "#7D8590"), dial=("#FFFFFF", "#E4E0D6"),
-                   rim="#9AA1AB", tick="#2A2D32", baton="#23262B", slot="#1E2126", doc=(30, 38, 52, 20),
-                   docedge="#23262B", chev="#2B5784"),
-    "sky": dict(bg=("#14264A", "#060C1A"), bezel=("#EAF1FD", "#8EA8D0", "#566F9C"), dial=("#183062", "#07101F"),
-                rim="#5876A6", tick="#D3E3FB", baton="#E4EEFC", slot="#030610", doc=(220, 235, 255, 26),
-                docedge="#D3E3FB", chev="#8DBBF7"),
-    "submariner": dict(bg=("#12261C", "#040806"), bezel=("#3B403D", "#171918", "#0A0B0A"), dial=("#111513", "#040504"),
-                       rim="#2A302C", tick="#E7F2EA", baton="#E7F2EA", slot="#000000", doc=(255, 255, 255, 18),
-                       docedge="#CFE6D6", chev="#5BDB96", marked=True, mark="#EFF5F0", lume="#5BDB96"),
-    "turquoise": dict(bg=("#0F2A2C", "#041012"), bezel=("#E3F7F5", "#8FC2BF", "#4F8582"), dial=("#1F5C5E", "#072123"),
-                      rim="#4B8E8A", tick="#D6F3F0", baton="#E9FAF8", slot="#020809", doc=(220, 250, 246, 26),
-                      docedge="#D6F3F0", chev="#6EE0D6"),
-    "bordeaux": dict(bg=("#2D1319", "#10060A"), bezel=("#F3DDE0", "#C28A94", "#7C3D49"), dial=("#5A1F2D", "#1C070C"),
-                     rim="#A05A68", tick="#F2D4D9", baton="#F8E4E7", slot="#060103", doc=(255, 225, 230, 26),
-                     docedge="#F2D4D9", chev="#F0A3B0"),
-    "wisteria": dict(bg=("#231E3A", "#0C0A18"), bezel=("#EFEAFB", "#A99BD6", "#6A5CA3"), dial=("#3C3270", "#120E26"),
-                     rim="#7D6BC0", tick="#E1D9F7", baton="#EEE9FB", slot="#05030C", doc=(235, 228, 255, 26),
-                     docedge="#E1D9F7", chev="#BBA8F5"),
-    "mint": dict(bg=("#E8F1EC", "#B9CFC3"), bezel=("#FFFFFF", "#B3C4BA", "#7E958A"), dial=("#FBFDFC", "#DCE8E1"),
-                 rim="#93AA9D", tick="#1F2A24", baton="#1B2620", slot="#1B2320", doc=(25, 40, 32, 20),
-                 docedge="#1B2620", chev="#1E6B4A"),
-}
-DEFAULT_SKIN = "oyster"
+SIZE = 1024
+SCALE = 4  # drawn at 4096 and scaled down, for smooth edges
 
 
-# ----- helpers -----------------------------------------------------------------------------------
-
-def rgb(value: str) -> tuple[int, int, int]:
+def hex_rgb(value):
     value = value.lstrip("#")
-    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def canvas() -> Image.Image:
-    return Image.new("RGBA", (S, S), (0, 0, 0, 0))
-
-
-def pt(x: float, y: float) -> tuple[float, float]:
-    """A point from the 824-tile concept, moved onto the full canvas."""
-    return C + (x - 512) * K, C + (y - 512) * K
-
-
-def circle_mask(radius: float) -> Image.Image:
-    big = Image.new("L", (S * SS, S * SS), 0)
-    ImageDraw.Draw(big).ellipse([(C - radius) * SS, (C - radius) * SS, (C + radius) * SS, (C + radius) * SS], fill=255)
-    return big.resize((S, S), Image.LANCZOS)
-
-
-def squircle_mask(half: float, n: float = 5.0) -> Image.Image:
-    """Continuous-corner rounded square, anti-aliased."""
-    y, x = np.mgrid[0:S * SS, 0:S * SS].astype(np.float32)
-    x = (x + 0.5) / SS - C
-    y = (y + 0.5) / SS - C
-    inside = (np.abs(x / half) ** n + np.abs(y / half) ** n) <= 1.0
-    return Image.fromarray((inside * 255).astype(np.uint8), "L").resize((S, S), Image.LANCZOS)
-
-
-def lerp3(t: np.ndarray, stops: list[tuple[float, tuple[int, int, int]]]) -> np.ndarray:
-    xs = [s[0] for s in stops]
-    return np.stack([np.interp(t, xs, [s[1][c] for s in stops]) for c in range(3)], axis=2)
-
-
-def with_alpha(color: np.ndarray, alpha: Image.Image | np.ndarray) -> Image.Image:
-    img = Image.fromarray(np.clip(color, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
-    if isinstance(alpha, np.ndarray):
-        alpha = Image.fromarray(np.clip(alpha, 0, 255).astype(np.uint8), "L")
-    img.putalpha(alpha)
-    return img
-
-
-def solid(color: tuple[int, ...], alpha: Image.Image, opacity: float = 1.0) -> Image.Image:
-    layer = Image.new("RGBA", (S, S), tuple(color[:3]) + (0,))
-    layer.putalpha(alpha.point(lambda p: int(p * opacity)))
-    return layer
-
-
-def big_draw() -> tuple[Image.Image, ImageDraw.ImageDraw]:
-    img = Image.new("RGBA", (S * SS, S * SS), (0, 0, 0, 0))
-    return img, ImageDraw.Draw(img)
-
-
-def to_canvas(img: Image.Image) -> Image.Image:
-    return img.resize((S, S), Image.LANCZOS)
-
-
-def rotated_rect(cx: float, cy: float, along: float, across: float, angle: float) -> list[tuple[float, float]]:
-    """Corners of a rectangle centred on (cx, cy): `across` radial (outward) by `along` tangential."""
-    ux, uy = math.cos(angle), math.sin(angle)  # outward
-    tx, ty = -uy, ux
-    pts = []
-    for a, b in ((-1, -1), (-1, 1), (1, 1), (1, -1)):
-        pts.append(((cx + ux * a * across / 2 + tx * b * along / 2) * SS, (cy + uy * a * across / 2 + ty * b * along / 2) * SS))
-    return pts
-
-
-# ----- layers ---------------------------------------------------------------------------------------
-
-BEZEL_R = 430
-DIAL_R = 370
-
-
-def layer_bezel(p: dict) -> Image.Image:
-    """A polished steel ring, lit from the top left, with a thin bright edge."""
-    y, x = np.mgrid[0:S, 0:S].astype(np.float32)
-    u = (x - (C - BEZEL_R)) / (2 * BEZEL_R)
-    v = (y - (C - BEZEL_R)) / (2 * BEZEL_R)
-    t = np.clip(((u - 0.15) * 0.7 + v * 1.0) / (0.7 * 0.7 + 1.0), 0, 1)
-    b1, b2, b3 = (rgb(c) for c in p["bezel"])
-    color = lerp3(t, [(0.0, b1), (0.5, b2), (1.0, b3)])
-    out = with_alpha(color, np.array(circle_mask(BEZEL_R)).astype(np.float32))
-    mask = circle_mask(BEZEL_R)
-    # A diagonal sheen: bright at the top left, shaded at the bottom right.
-    light = np.clip(1 - t / 0.45, 0, 1) * 0.30
-    dark = np.clip((t - 0.45) / 0.55, 0, 1) * 0.22
-    out = Image.alpha_composite(out, with_alpha(np.full((S, S, 3), 255, np.float32), np.array(mask).astype(np.float32) * light))
-    out = Image.alpha_composite(out, with_alpha(np.zeros((S, S, 3), np.float32), np.array(mask).astype(np.float32) * dark))
-    edge = ImageChops.subtract(mask, circle_mask(BEZEL_R - 4))
-    out = Image.alpha_composite(out, solid((255, 255, 255), edge, 0.45))
-    if p.get("marked"):
-        img, d = big_draw()
-        mark = rgb(p["mark"]) + (255,)
-        for k in range(60):
-            ang = math.radians(k * 6 - 90)
-            major = k % 5 == 0
-            radius = BEZEL_R - 28
-            length = 34 if major else 17
-            width = 11 if major else 4.5
-            cx, cy = C + math.cos(ang) * radius, C + math.sin(ang) * radius
-            d.polygon(rotated_rect(cx, cy, width, length, ang), fill=mark)
-        out = Image.alpha_composite(out, to_canvas(img))
-        pip = Image.new("L", (S * SS, S * SS), 0)
-        ImageDraw.Draw(pip).ellipse([(C - 22) * SS, (C - BEZEL_R + 26 - 22) * SS, (C + 22) * SS, (C - BEZEL_R + 26 + 22) * SS], fill=255)
-        out = Image.alpha_composite(out, solid(rgb(p["lume"]), to_canvas(pip.convert("L")), 1.0))
-    return out
-
-
-def layer_chamber(p: dict) -> Image.Image:
-    """The dial: a soft radial gradient with a thin rim."""
-    y, x = np.mgrid[0:S, 0:S].astype(np.float32)
-    cx0, cy0 = C - DIAL_R + 0.4 * 2 * DIAL_R, C - DIAL_R + 0.3 * 2 * DIAL_R
-    t = np.clip(np.hypot(x - cx0, y - cy0) / (0.9 * 2 * DIAL_R), 0, 1)
-    d1, d2 = rgb(p["dial"][0]), rgb(p["dial"][1])
-    color = lerp3(t, [(0.0, d1), (1.0, d2)])
-    mask = circle_mask(DIAL_R)
-    out = with_alpha(color, np.array(mask).astype(np.float32))
-    rim = ImageChops.subtract(mask, circle_mask(DIAL_R - 10))
-    return Image.alpha_composite(out, solid(rgb(p["rim"]), rim, 1.0))
-
-
-def layer_ticks(p: dict) -> Image.Image:
-    """A fine minute track and twelve baton hour markers."""
-    img, d = big_draw()
-    tick = rgb(p["tick"]) + (215,)
-    baton = rgb(p["baton"]) + (255,)
-    for k in range(60):
-        if k % 5 == 0:
-            continue
-        ang = math.radians(k * 6 - 90)
-        radius = 333
-        d.polygon(rotated_rect(C + math.cos(ang) * radius, C + math.sin(ang) * radius, 3.4, 15, ang), fill=tick)
-    for k in range(12):
-        ang = math.radians(k * 30 - 90)
-        radius = 320
-        d.polygon(rotated_rect(C + math.cos(ang) * radius, C + math.sin(ang) * radius, 10.5, 55, ang), fill=baton)
-    return to_canvas(img)
-
-
-def rounded_box(box: tuple[float, float, float, float], radius: float) -> Image.Image:
-    big = Image.new("L", (S * SS, S * SS), 0)
-    ImageDraw.Draw(big).rounded_rectangle([c * SS for c in box], radius=radius * SS, fill=255)
-    return big.resize((S, S), Image.LANCZOS)
-
-
-def layer_slot(p: dict) -> Image.Image:
-    """The tray slot: a dark cavity."""
-    x0, y0 = pt(352, 598)
-    x1, y1 = pt(672, 642)
-    return solid(rgb(p["slot"]), rounded_box((x0, y0, x1, y1), (y1 - y0) / 2), 1.0)
-
-
-def layer_glass(p: dict) -> Image.Image:
-    """The document with its folded corner, cut off where it slides into the slot."""
-    img, d = big_draw()
-    outline = [pt(416, 330), pt(562, 330), pt(608, 376), pt(608, 640), pt(416, 640)]
-    d.polygon([(x * SS, y * SS) for x, y in outline], fill=tuple(p["doc"]))
-    width = int(6 * K * SS)
-    line = [(x * SS, y * SS) for x, y in outline + [outline[0]]]
-    d.line(line, fill=rgb(p["docedge"]) + (255,), width=width, joint="curve")
-    fold = [(x * SS, y * SS) for x, y in (pt(562, 330), pt(562, 376), pt(608, 376))]
-    d.line(fold, fill=rgb(p["docedge"]) + (255,), width=width, joint="curve")
-    for x, y in line[:-1] + fold:  # round the joints
-        d.ellipse([x - width / 2, y - width / 2, x + width / 2, y + width / 2], fill=rgb(p["docedge"]) + (255,))
-    out = to_canvas(img)
-    cut = pt(0, 618)[1]
-    arr = np.array(out)
-    arr[int(round(cut)):, :, 3] = 0
-    return Image.fromarray(arr, "RGBA")
-
-
-def layer_chevron(p: dict) -> Image.Image:
-    img, d = big_draw()
-    pts = [pt(466, 452), pt(512, 498), pt(558, 452)]
-    width = 28 * K
-    color = rgb(p["chev"]) + (255,)
-    d.line([(x * SS, y * SS) for x, y in pts], fill=color, width=int(width * SS), joint="curve")
-    for x, y in (pts[0], pts[-1]):
-        d.ellipse([(x - width / 2) * SS, (y - width / 2) * SS, (x + width / 2) * SS, (y + width / 2) * SS], fill=color)
-    out = to_canvas(img)
-    shadow = ImageChops.offset(out.getchannel("A").filter(ImageFilter.GaussianBlur(7)), 0, 8)
-    return Image.alpha_composite(solid((0, 0, 0), shadow, 0.28), out)
-
-
-def layer_lip(p: dict) -> Image.Image:
-    """The front edge of the slot, in front of the document."""
-    top, bottom = pt(0, 620)[1], pt(0, 648)[1]
-    left, right = pt(352, 0)[0], pt(672, 0)[0]
-    radius = (pt(0, 642)[1] - pt(0, 598)[1]) / 2
-    big = Image.new("L", (S * SS, S * SS), 0)
-    d = ImageDraw.Draw(big)
-    pts: list[tuple[float, float]] = [(left, top), (right, top), (right, top + (pt(0, 626)[1] - top))]
-    for k in range(0, 19):  # the right-hand corner
-        ang = math.radians(k * 90 / 18)
-        pts.append((right - radius + radius * math.cos(ang), bottom - radius + radius * math.sin(ang)))
-    for k in range(0, 19):  # the left-hand corner
-        ang = math.radians(90 + k * 90 / 18)
-        pts.append((left + radius + radius * math.cos(ang), bottom - radius + radius * math.sin(ang)))
-    d.polygon([(x * SS, y * SS) for x, y in pts], fill=255)
-    mask = big.resize((S, S), Image.LANCZOS)
-    y = np.mgrid[0:S, 0:S][0].astype(np.float32)
-    t = np.clip((y - top) / max(1.0, bottom - top), 0, 1)
-    b1, b3 = rgb(p["bezel"][0]), rgb(p["bezel"][2])
-    color = lerp3(t, [(0.0, b1), (1.0, b3)])
-    return with_alpha(color, np.array(mask).astype(np.float32) * 0.95)
-
-
-LAYER_FUNCS = {
-    "bezel": layer_bezel,
-    "chamber": layer_chamber,
-    "ticks": layer_ticks,
-    "slot": layer_slot,
-    "glass": layer_glass,
-    "chevron": layer_chevron,
-    "lip": layer_lip,
+# tile: bottom, middle, top. glyph: lower right (deep), middle, upper left (light).
+# edge: the glyph's thin outline. chevron: bottom and top of the chevron. rim: the tile's fine edge.
+SKINS = {
+    "signature": dict(tile=("#050607", "#0B0C0D", "#1A1B1E"), glyph=("#3A3B3F", "#8D8F93", "#F4F4F5"), edge="#FFFFFF",
+                      rim="#D9DADC", chevron=("#0B0C0D", "#2A2B2E")),
+    "sky": dict(tile=("#060B1B", "#0B1733", "#14335F"), glyph=("#053AFF", "#00A1FF", "#0DF0F2"), edge="#80F5FF", rim="#408CF2"),
+    "green": dict(tile=("#04110B", "#0A2218", "#0F3D2A"), glyph=("#0B7A44", "#24B86C", "#86F2B4"), edge="#B5FFD2", rim="#7CE2A3"),
+    "turquoise": dict(tile=("#041213", "#082426", "#0C3B3D"), glyph=("#0E7A75", "#2EC2B8", "#93F5EC"), edge="#C2FFF9", rim="#5FD0C8"),
+    "bordeaux": dict(tile=("#130609", "#2A0D15", "#4A1624"), glyph=("#A1263F", "#E06A81", "#FFC4CE"), edge="#FFD9DF", rim="#E8909F"),
+    "wisteria": dict(tile=("#0B0917", "#1A1533", "#2E2558"), glyph=("#5A44C0", "#957EEE", "#E0D6FF"), edge="#EDE6FF", rim="#B9A6F2"),
 }
+# Every skin in Sources/EchoNylaCore/Skins.swift except Signature, whose icon is the app's own.
+SKIN_ICONS = ["sky", "green", "turquoise", "bordeaux", "wisteria"]
+
+# The drawing, in a y-down 1024 grid (the mock-up's icon A, scaled from its 100-unit box).
+PAGE = [(348, 184), (573, 184), (686, 297), (686, 614), (348, 614)]
+FOLD = [(573, 184), (573, 297), (686, 297)]
+CHEVRON = [(440, 369), (512, 441), (584, 369)]
+TRAY_TOP, TRAY_BOTTOM, TRAY_LEFT, TRAY_RIGHT, TRAY_RADIUS = 563, 829, 195, 829, 102
+NOTCH = [(348, 563), (389, 645), (635, 645), (676, 563)]  # where the page goes in
 
 
-def render_layers(p: dict) -> dict[str, Image.Image]:
-    return {name: fn(p) for name, fn in LAYER_FUNCS.items()}
+def scaled(points):
+    return [(x * SCALE, y * SCALE) for x, y in points]
 
 
-def tile(p: dict) -> Image.Image:
-    top, bottom = rgb(p["bg"][0]), rgb(p["bg"][1])
-    y = np.mgrid[0:S, 0:S][0].astype(np.float32)
-    color = lerp3(np.clip(y / (S - 1), 0, 1), [(0.0, top), (1.0, bottom)])
-    base = with_alpha(color, np.full((S, S), 255, np.float32))
-    gloss = np.clip(1 - y / (S * 0.5), 0, 1) * 0.16 * 255
-    return Image.alpha_composite(base, with_alpha(np.full((S, S, 3), 255, np.float32), gloss))
+def tray_points():
+    """The tray's outline: flat top with a notch, rounded bottom corners."""
+    points = [(TRAY_LEFT, TRAY_TOP)] + NOTCH + [(TRAY_RIGHT, TRAY_TOP), (TRAY_RIGHT, TRAY_BOTTOM - TRAY_RADIUS)]
+    for i in range(1, 33):  # bottom right corner
+        a = np.radians(90 * i / 32)
+        points.append((TRAY_RIGHT - TRAY_RADIUS + TRAY_RADIUS * np.cos(a), TRAY_BOTTOM - TRAY_RADIUS + TRAY_RADIUS * np.sin(a)))
+    points.append((TRAY_LEFT + TRAY_RADIUS, TRAY_BOTTOM))
+    for i in range(1, 33):  # bottom left corner
+        a = np.radians(90 + 90 * i / 32)
+        points.append((TRAY_LEFT + TRAY_RADIUS + TRAY_RADIUS * np.cos(a), TRAY_BOTTOM - TRAY_RADIUS + TRAY_RADIUS * np.sin(a)))
+    return points
 
 
-def flat_bleed(p: dict, layers: dict[str, Image.Image]) -> Image.Image:
-    """The whole icon edge to edge in a squircle (the fallback PNG, the .icns and the README)."""
-    base = tile(p)
-    for name in BACK_TO_FRONT:
-        base = Image.alpha_composite(base, layers[name])
-    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    out.paste(base, (0, 0), squircle_mask(C))
-    return out
+def gradient(stops, angle_degrees, bounds):
+    """A linear gradient across bounds (x0, y0, x1, y1, y-down); 90 degrees runs bottom to top."""
+    n = SIZE * SCALE
+    ys, xs = np.mgrid[0:n, 0:n].astype(np.float32)
+    gx = xs / SCALE
+    gy = SIZE - ys / SCALE
+    angle = np.radians(angle_degrees)
+    dx, dy = np.cos(angle), np.sin(angle)
+    x0, y0, x1, y1 = bounds
+    corners = [x * dx + (SIZE - y) * dy for x in (x0, x1) for y in (y0, y1)]
+    low, high = min(corners), max(corners)
+    t = np.clip((gx * dx + gy * dy - low) / (high - low), 0, 1)
+    colours = [np.array(hex_rgb(s), dtype=np.float32) for s in stops]
+    positions = np.linspace(0, 1, len(colours))
+    out = np.zeros((n, n, 3), dtype=np.float32)
+    for channel in range(3):
+        out[..., channel] = np.interp(t, positions, [c[channel] for c in colours])
+    return Image.fromarray(out.astype(np.uint8), "RGB")
 
 
-def dock_icon(flat: Image.Image) -> Image.Image:
-    """The icon at the standard macOS size (an 824 tile on a 1024 canvas) with a soft shadow, for the
-    Dock icon the app sets itself when a skin changes."""
-    body = flat.resize((824, 824), Image.LANCZOS)
-    out = canvas()
-    shadow = Image.new("L", (S, S), 0)
-    shadow.paste(body.getchannel("A"), (100, 100 + 12))
-    out = Image.alpha_composite(out, solid((0, 0, 0), shadow.filter(ImageFilter.GaussianBlur(14)), 0.38))
-    out.alpha_composite(body, (100, 100))
-    return out
+def mask(draw_shape):
+    image = Image.new("L", (SIZE * SCALE, SIZE * SCALE), 0)
+    draw_shape(ImageDraw.Draw(image))
+    return image
 
 
-def write_icon_json(p: dict) -> None:
-    def srgb(value: str) -> str:
-        r, g, b = rgb(value)
-        return f"srgb:{r / 255:.5f},{g / 255:.5f},{b / 255:.5f},1.00000"
+def icon(skin, with_tile=True, with_shadow=True):
+    colours = SKINS[skin]
+    n = SIZE * SCALE
+    canvas = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    separator = hex_rgb(colours["tile"][1])
 
-    data = {
-        "fill": {"linear-gradient": [srgb(p["bg"][0]), srgb(p["bg"][1])]},
-        "groups": [
-            {
-                "layers": [
-                    {"image-name": "lip.png", "name": "lip"},
-                    {"image-name": "chevron.png", "name": "chevron"},
-                    {"glass": True, "image-name": "glass.png", "name": "glass"},
-                ],
-                "name": "Tile",
-                "shadow": {"kind": "neutral", "opacity": 0.5},
-                "specular": True,
-                "translucency": {"enabled": True, "value": 0.15},
-            },
-            {"layers": [{"image-name": "slot.png", "name": "slot"}], "name": "Slot"},
-            {
-                "layers": [
-                    {"image-name": "ticks.png", "name": "ticks"},
-                    {"image-name": "chamber.png", "name": "chamber"},
-                ],
-                "name": "Dial",
-            },
-            {"layers": [{"image-name": "bezel.png", "name": "bezel"}], "name": "Bezel"},
-        ],
-        "supported-platforms": {"squares": "shared"},
+    if with_tile:
+        tile_box = [100 * SCALE, 100 * SCALE, 924 * SCALE, 924 * SCALE]
+        tile = mask(lambda d: d.rounded_rectangle(tile_box, radius=185 * SCALE, fill=255))
+        canvas.paste(gradient(colours["tile"], 90, (100, 100, 924, 924)), (0, 0), tile)
+        rim = mask(lambda d: d.rounded_rectangle(tile_box, radius=185 * SCALE, outline=255, width=2 * SCALE))
+        canvas.paste(Image.new("RGB", (n, n), hex_rgb(colours["rim"])), (0, 0), rim.point(lambda v: int(v * 0.28)))
+
+    glyph_fill = gradient(colours["glyph"], 125, (195, 184, 829, 829))
+    edge_colour = Image.new("RGB", (n, n), hex_rgb(colours["edge"]))
+
+    # The page, behind the tray.
+    page = mask(lambda d: d.polygon(scaled(PAGE), fill=255))
+    canvas.paste(glyph_fill, (0, 0), page)
+    page_edge = mask(lambda d: d.line(scaled(PAGE + PAGE[:1]), fill=255, width=int(1.5 * SCALE)))
+    canvas.paste(edge_colour, (0, 0), page_edge.point(lambda v: int(v * 0.38)))
+    fold = mask(lambda d: d.polygon(scaled(FOLD), fill=255))
+    canvas.paste(Image.new("RGB", (n, n), separator), (0, 0), fold.point(lambda v: int(v * 0.35)))
+    fold_line = mask(lambda d: d.line(scaled(FOLD), fill=255, width=6 * SCALE, joint="curve"))
+    canvas.paste(Image.new("RGB", (n, n), separator), (0, 0), fold_line)
+
+    chevron = mask(lambda d: (d.line(scaled(CHEVRON), fill=255, width=37 * SCALE, joint="curve"),
+                              [d.ellipse([(x - 18.5) * SCALE, (y - 18.5) * SCALE, (x + 18.5) * SCALE, (y + 18.5) * SCALE], fill=255)
+                               for x, y in CHEVRON]))
+    canvas.paste(gradient(colours.get("chevron", ("#E3F2FF", "#FFFFFF")), 90, (440, 369, 584, 441)), (0, 0), chevron)
+
+    # The tray in front, with a dark outline so it stands apart from the page.
+    tray = tray_points()
+    outline = mask(lambda d: d.line(scaled(tray + tray[:1]), fill=255, width=22 * SCALE, joint="curve"))
+    canvas.paste(Image.new("RGB", (n, n), separator), (0, 0), outline)
+    body = mask(lambda d: d.polygon(scaled(tray), fill=255))
+    canvas.paste(glyph_fill, (0, 0), body)
+    tray_edge = mask(lambda d: d.line(scaled(tray + tray[:1]), fill=255, width=int(1.5 * SCALE)))
+    canvas.paste(edge_colour, (0, 0), tray_edge.point(lambda v: int(v * 0.38)))
+
+    canvas = canvas.resize((SIZE, SIZE), Image.LANCZOS)
+    if not with_shadow:
+        return canvas
+
+    # A soft shadow under the tile, as macOS draws under app icons.
+    shadow_mask = Image.new("L", (SIZE, SIZE), 0)
+    shadow_mask.paste(canvas.getchannel("A").point(lambda v: int(v * 0.45)), (0, 12))
+    shadow = Image.new("RGBA", (SIZE, SIZE), hex_rgb(colours["tile"][0]) + (0,))
+    shadow.putalpha(shadow_mask.filter(ImageFilter.GaussianBlur(14)))
+    return Image.alpha_composite(shadow, canvas)
+
+
+def main():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    outputs = {
+        root / "Resources" / "AppIcon.icon" / "Assets" / "glyph.png": icon("signature", with_tile=False, with_shadow=False),
+        root / "Resources" / "AppIcon-1024.png": icon("signature", with_shadow=False),
+        root / "docs" / "images" / "echonyla-icon.png": icon("signature", with_shadow=False),
     }
-    (ICON / "icon.json").write_text(json.dumps(data, indent=2, separators=(",", " : ")) + "\n")
-
-
-def main() -> None:
-    ASSETS.mkdir(parents=True, exist_ok=True)
-    SKIN_ICONS.mkdir(parents=True, exist_ok=True)
-    default = SKINS[DEFAULT_SKIN]
-    layers = render_layers(default)
-    for name, image in layers.items():
-        image.save(ASSETS / f"{name}.png", optimize=True)
-    write_icon_json(default)
-    flat = flat_bleed(default, layers)
-    flat.save(ROOT / "Resources" / "AppIcon-1024.png", optimize=True)
-    flat.save(ROOT / "docs" / "images" / "levant-icon.png", optimize=True)
-    for skin, palette in SKINS.items():
-        skin_layers = layers if skin == DEFAULT_SKIN else render_layers(palette)
-        dock_icon(flat_bleed(palette, skin_layers)).save(SKIN_ICONS / f"icon-{skin}.png", optimize=True)
-    print("wrote layers:", ", ".join(BACK_TO_FRONT), "; the flat 1024px icon; and", len(SKINS), "skin icons")
+    for skin in SKIN_ICONS:
+        outputs[root / "Resources" / "SkinIcons" / f"icon-{skin}.png"] = icon(skin)
+    for path, image in outputs.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path, optimize=True)
+        print(f"wrote {path.relative_to(root)}")
 
 
 if __name__ == "__main__":
