@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sends a Developer ID-signed Levant.app to Apple's notary service and staples the ticket.
+# Sends a Developer ID-signed EchoNyla.app to Apple's notary service and staples the ticket.
 # Any answer but "Accepted" stops the build, so nothing unnotarized is published this way.
 # Needs NOTARY_KEY_PATH (an App Store Connect API key, .p8), NOTARY_KEY_ID and NOTARY_ISSUER_ID.
 set -euo pipefail
 
-APP="${1:?usage: notarize.sh <path to Levant.app>}"
+APP="${1:?usage: notarize.sh <path to EchoNyla.app>}"
 for name in NOTARY_KEY_PATH NOTARY_KEY_ID NOTARY_ISSUER_ID; do
     if [[ -z "${!name:-}" ]]; then
         printf 'Developer ID builds must be notarized, but %s is not set.\n' "$name" >&2
@@ -13,7 +13,7 @@ for name in NOTARY_KEY_PATH NOTARY_KEY_ID NOTARY_ISSUER_ID; do
 done
 test -s "$NOTARY_KEY_PATH"
 
-WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/levant-notarize.XXXXXX")"
+WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/echonyla-notarize.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 SUBMISSION="$WORK_DIR/$(basename "$APP" .app)-notarize.zip"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$SUBMISSION"

@@ -1,3 +1,0 @@
-import QuickDropZoneCore
-
-typealias ScreenshotMetadata = QuickDropZoneCore.ScreenshotMetadata

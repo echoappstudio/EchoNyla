@@ -12,8 +12,8 @@
 #   SELF_SIGN_P12_BASE64, SELF_SIGN_P12_PASSWORD           (the self-signed trial)
 set -euo pipefail
 
-KEYCHAIN="${RUNNER_TEMP:?}/levant-signing.keychain-db"
-SECRETS_DIR="$RUNNER_TEMP/levant-signing-secrets"
+KEYCHAIN="${RUNNER_TEMP:?}/echonyla-signing.keychain-db"
+SECRETS_DIR="$RUNNER_TEMP/echonyla-signing-secrets"
 
 if [[ "${1:-}" == "cleanup" ]]; then
     security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true

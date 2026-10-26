@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Updates an older Levant to a newer one through Sparkle, using a test feed on this Mac:
-#   1. with automatic checks turned off in Levant's saved settings, it doesn't check;
+# Updates an older EchoNyla to a newer one through Sparkle, using a test feed on this Mac:
+#   1. with automatic checks turned off in EchoNyla's saved settings, it doesn't check;
 #   2. an update whose signature doesn't match is downloaded but never installed;
-#   3. a correctly signed update is installed and Levant relaunches as the new version,
+#   3. a correctly signed update is installed and EchoNyla relaunches as the new version,
 #      with its settings kept and (for a real signing identity) the same code identity.
 # The two test copies are the packaged app with a test feed address, a throwaway signing key and
 # their own version numbers, re-signed by the same script as the release. Needs OpenSSL 3.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_APP="$ROOT_DIR/dist/Levant.app"
+SOURCE_APP="$ROOT_DIR/dist/EchoNyla.app"
 RELEASE_TOOL=(python3 -I "$ROOT_DIR/Scripts/release/sparkle_release.py")
-DOMAIN="com.echoapps.levant"
+DOMAIN="com.echoapps.echonyla"
 PORT=8765
 FEED_URL="http://127.0.0.1:$PORT/appcast.xml"
 SIGN_MODE="${SIGN_MODE:-adhoc}"
@@ -24,10 +24,10 @@ fi
 export SPARKLE_OPENSSL
 "$SPARKLE_OPENSSL" version | grep -q '^OpenSSL 3'
 
-WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/levant-update.XXXXXX")"
+WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/echonyla-update.XXXXXX")"
 FEED_DIR="$WORK_DIR/feed"
 INSTALL_DIR="$WORK_DIR/Applications"
-INSTALLED_APP="$INSTALL_DIR/Levant.app"
+INSTALLED_APP="$INSTALL_DIR/EchoNyla.app"
 SERVER_LOG="$WORK_DIR/server.log"
 mkdir -p "$FEED_DIR" "$INSTALL_DIR" "$WORK_DIR/old" "$WORK_DIR/new"
 SERVER_PID=""
@@ -35,13 +35,13 @@ SERVER_PID=""
 cleanup() {
     status=$?
     trap - EXIT
-    pkill -x Levant >/dev/null 2>&1 || true
+    pkill -x EchoNyla >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]]; then
         kill "$SERVER_PID" >/dev/null 2>&1 || true
     fi
-    defaults delete "$DOMAIN" QuickDropZone.updateTestMarker >/dev/null 2>&1 || true
-    for key in mode.v1 fixedSkin.v1 finderIconShown.v1; do
-        defaults delete "$DOMAIN" "QuickDropZone.appearance.$key" >/dev/null 2>&1 || true
+    defaults delete "$DOMAIN" EchoNyla.updateTestMarker >/dev/null 2>&1 || true
+    for key in skin.v1 finderIconShown.v1; do
+        defaults delete "$DOMAIN" "EchoNyla.appearance.$key" >/dev/null 2>&1 || true
     done
     rm -rf "$WORK_DIR"
     exit "$status"
@@ -73,14 +73,14 @@ make_copy() {
     bash "$ROOT_DIR/Scripts/sign-app.sh" "$destination"
 }
 
-make_copy "$WORK_DIR/old/Levant.app" "$OLD_BUILD" "$BASE_VERSION"
-make_copy "$WORK_DIR/new/Levant.app" "$NEW_BUILD" "$NEW_VERSION"
-OLD_REQUIREMENT="$(codesign --display --requirements - "$WORK_DIR/old/Levant.app" 2>/dev/null | sed -n 's/^designated => //p')"
-NEW_REQUIREMENT="$(codesign --display --requirements - "$WORK_DIR/new/Levant.app" 2>/dev/null | sed -n 's/^designated => //p')"
+make_copy "$WORK_DIR/old/EchoNyla.app" "$OLD_BUILD" "$BASE_VERSION"
+make_copy "$WORK_DIR/new/EchoNyla.app" "$NEW_BUILD" "$NEW_VERSION"
+OLD_REQUIREMENT="$(codesign --display --requirements - "$WORK_DIR/old/EchoNyla.app" 2>/dev/null | sed -n 's/^designated => //p')"
+NEW_REQUIREMENT="$(codesign --display --requirements - "$WORK_DIR/new/EchoNyla.app" 2>/dev/null | sed -n 's/^designated => //p')"
 test -n "$OLD_REQUIREMENT"
 
-ARCHIVE="$FEED_DIR/Levant-$NEW_VERSION.zip"
-ditto -c -k --sequesterRsrc --keepParent "$WORK_DIR/new/Levant.app" "$ARCHIVE"
+ARCHIVE="$FEED_DIR/EchoNyla-$NEW_VERSION.zip"
+ditto -c -k --sequesterRsrc --keepParent "$WORK_DIR/new/EchoNyla.app" "$ARCHIVE"
 GOOD_SIGNATURE="$("${RELEASE_TOOL[@]}" sign --seed-env TEST_SPARKLE_KEY "$ARCHIVE")"
 "${RELEASE_TOOL[@]}" verify --public-key "$PUBLIC_KEY" "$ARCHIVE" "$GOOD_SIGNATURE"
 printf 'not the update' > "$WORK_DIR/other.bin"
@@ -90,10 +90,10 @@ printf -- '- Test update.\n' > "$WORK_DIR/notes.md"
 write_feed() {
     local signature="$1" output="$2"
     # The feed must say https; the test copies only reach it through 127.0.0.1.
-    "${RELEASE_TOOL[@]}" feed --app-name "Levant" --version "$NEW_VERSION" --build "$NEW_BUILD" \
-        --url "https://placeholder.invalid/Levant.zip" --archive "$ARCHIVE" --signature "$signature" \
+    "${RELEASE_TOOL[@]}" feed --app-name "EchoNyla" --version "$NEW_VERSION" --build "$NEW_BUILD" \
+        --url "https://placeholder.invalid/EchoNyla.zip" --archive "$ARCHIVE" --signature "$signature" \
         --minimum-system 26.0 --notes "$WORK_DIR/notes.md" --output "$output"
-    sed -i '' "s|https://placeholder.invalid/Levant.zip|http://127.0.0.1:$PORT/$(basename "$ARCHIVE")|" "$output"
+    sed -i '' "s|https://placeholder.invalid/EchoNyla.zip|http://127.0.0.1:$PORT/$(basename "$ARCHIVE")|" "$output"
     "${RELEASE_TOOL[@]}" sign-feed --seed-env TEST_SPARKLE_KEY "$output"
     "${RELEASE_TOOL[@]}" verify-feed --public-key "$PUBLIC_KEY" "$output"
 }
@@ -132,41 +132,40 @@ archive_requests() {
 launch_installed() {
     open -n -g "$INSTALLED_APP"
     for _ in {1..20}; do
-        if pgrep -x Levant >/dev/null 2>&1; then return 0; fi
+        if pgrep -x EchoNyla >/dev/null 2>&1; then return 0; fi
         sleep 0.5
     done
-    printf 'Levant did not start.\n' >&2
+    printf 'EchoNyla did not start.\n' >&2
     return 1
 }
 
-quit_levant() {
-    pkill -x Levant >/dev/null 2>&1 || true
+quit_app() {
+    pkill -x EchoNyla >/dev/null 2>&1 || true
     for _ in {1..20}; do
-        if ! pgrep -x Levant >/dev/null 2>&1; then return 0; fi
+        if ! pgrep -x EchoNyla >/dev/null 2>&1; then return 0; fi
         sleep 0.5
     done
-    pkill -9 -x Levant >/dev/null 2>&1 || true
+    pkill -9 -x EchoNyla >/dev/null 2>&1 || true
 }
 
-ditto "$WORK_DIR/old/Levant.app" "$INSTALLED_APP"
+ditto "$WORK_DIR/old/EchoNyla.app" "$INSTALLED_APP"
 MARKER="kept-$(date +%s)"
-defaults write "$DOMAIN" QuickDropZone.updateTestMarker -string "$MARKER"
-# One skin other than Oyster, the app's own icon, so the installed copy wears the Sky icon in
+defaults write "$DOMAIN" EchoNyla.updateTestMarker -string "$MARKER"
+# One skin other than Signature, the app's own icon, so the installed copy wears the Sky icon in
 # Finder throughout: the update must install over it, and the relaunched app must put it back.
-defaults write "$DOMAIN" QuickDropZone.appearance.mode.v1 -string fixed
-defaults write "$DOMAIN" QuickDropZone.appearance.fixedSkin.v1 -string sky
+defaults write "$DOMAIN" EchoNyla.appearance.skin.v1 -string sky
 defaults write "$DOMAIN" SUAutomaticallyUpdate -bool true
 # A check just happened as far as the hourly schedule knows, so only the launch check can find
 # the update quickly.
 defaults write "$DOMAIN" SULastCheckTime -date "$(date -u '+%Y-%m-%d %H:%M:%S +0000')"
 defaults delete "$DOMAIN" SUSkippedVersion >/dev/null 2>&1 || true
 
-echo "1. Automatic checks off: Levant must not check."
+echo "1. Automatic checks off: EchoNyla must not check."
 cp "$WORK_DIR/appcast-good.xml" "$FEED_DIR/appcast.xml"
 defaults write "$DOMAIN" SUEnableAutomaticChecks -bool false
 launch_installed
 sleep 20
-quit_levant
+quit_app
 test "$(feed_requests)" -eq 0
 test "$(installed_build)" = "$OLD_BUILD"
 echo "   No check was made."
@@ -183,7 +182,7 @@ test "$(feed_requests)" -ge 1
 test "$(archive_requests)" -ge 1
 sleep 20
 test "$(installed_build)" = "$OLD_BUILD"
-quit_levant
+quit_app
 test "$(installed_build)" = "$OLD_BUILD"
 echo "   The update was downloaded and refused."
 
@@ -194,16 +193,16 @@ if [[ ! -f "$INSTALLED_APP/Icon"$'\r' ]]; then
 fi
 echo "   The installed copy wears its skin icon in Finder."
 
-echo "3. A signed update installs and Levant relaunches."
+echo "3. A signed update installs and EchoNyla relaunches."
 cp "$WORK_DIR/appcast-good.xml" "$FEED_DIR/appcast.xml"
 defaults write "$DOMAIN" SULastCheckTime -date "$(date -u '+%Y-%m-%d %H:%M:%S +0000')"
 REQUESTS_BEFORE="$(feed_requests)"
 launch_installed
-OLD_PID="$(pgrep -x Levant | head -n 1)"
+OLD_PID="$(pgrep -x EchoNyla | head -n 1)"
 NEW_PID=""
 for _ in {1..180}; do
     if [[ "$(installed_build)" == "$NEW_BUILD" ]]; then
-        NEW_PID="$(pgrep -x Levant | grep -vx "$OLD_PID" | head -n 1 || true)"
+        NEW_PID="$(pgrep -x EchoNyla | grep -vx "$OLD_PID" | head -n 1 || true)"
         if [[ -n "$NEW_PID" ]]; then break; fi
     fi
     sleep 1
@@ -214,12 +213,12 @@ if [[ "$(installed_build)" != "$NEW_BUILD" ]]; then
     exit 1
 fi
 if [[ -z "$NEW_PID" ]]; then
-    printf 'The update was installed but Levant did not relaunch.\n' >&2
+    printf 'The update was installed but EchoNyla did not relaunch.\n' >&2
     exit 1
 fi
 RUNNING_PATH="$(ps -o comm= -p "$NEW_PID")"
-if [[ "$(realpath "$RUNNING_PATH")" != "$(realpath "$INSTALLED_APP/Contents/MacOS/Levant")" ]]; then
-    printf 'The relaunched Levant runs from %s, not the updated app.\n' "$RUNNING_PATH" >&2
+if [[ "$(realpath "$RUNNING_PATH")" != "$(realpath "$INSTALLED_APP/Contents/MacOS/EchoNyla")" ]]; then
+    printf 'The relaunched EchoNyla runs from %s, not the updated app.\n' "$RUNNING_PATH" >&2
     exit 1
 fi
 for _ in {1..20}; do
@@ -231,13 +230,13 @@ if [[ ! -f "$INSTALLED_APP/Icon"$'\r' ]]; then
     exit 1
 fi
 # The Finder icon sits outside what the signature covers, so check the update without it.
-VERIFY_APP="$WORK_DIR/verify/Levant.app"
+VERIFY_APP="$WORK_DIR/verify/EchoNyla.app"
 mkdir -p "$WORK_DIR/verify"
 ditto "$INSTALLED_APP" "$VERIFY_APP"
 rm -f "$VERIFY_APP/Icon"$'\r'
 xattr -c "$VERIFY_APP"
 codesign --verify --deep --strict "$VERIFY_APP"
-test "$(defaults read "$DOMAIN" QuickDropZone.updateTestMarker)" = "$MARKER"
+test "$(defaults read "$DOMAIN" EchoNyla.updateTestMarker)" = "$MARKER"
 echo "   Installed build $NEW_BUILD, relaunched (process $NEW_PID), settings kept, skin icon back."
 
 echo "Code identity (what macOS privacy permissions are tied to):"

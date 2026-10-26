@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sparkle release helpers for Levant's CI.
+"""Sparkle release helpers for EchoNyla's CI.
 
 Signs update archives and the update feed (appcast) with Ed25519 through OpenSSL 3, writes the
 feed, and refuses a feed that would go back to an older build. Private keys are read from an

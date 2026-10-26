@@ -1,4 +1,4 @@
-Levant includes the following open-source software.
+EchoNyla includes the following open-source software.
 
 ========================================
 Sparkle 2.10.0 (https://sparkle-project.org)
@@ -139,3 +139,20 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
 STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+
+========================================
+File type icons from vscode-icons (https://github.com/vscode-icons/vscode-icons)
+Used to show what kind of file each file is.
+========================================
+
+Copyright The vscode-icons Contributors and the respective brand owners.
+
+The icons are licensed under the Creative Commons Attribution-ShareAlike 4.0
+International license (https://creativecommons.org/licenses/by-sa/4.0/);
+branded icons keep their owners' copyright license. EchoNyla ships them as
+256 x 256 PNG files converted from the original SVG artwork, renamed, and
+otherwise unchanged. Details: Contents/Resources/FileTypes/LICENSE.txt.
+
+Pictures for Mac file types (Pages, Numbers, Keynote, Mail, Calendar,
+Contacts, apps, icon files, property lists and aliases) are not included:
+EchoNyla shows them with the artwork macOS provides on your Mac.

@@ -43,7 +43,7 @@ jobs:
       - name: Build, package, and verify app bundle and ZIP
         run: bash Scripts/package-app.sh
       - name: Verify downloadable ZIP checksum sidecar
-        run: python3 Scripts/test_checksum_sidecar.py dist/Levant-2.8.0.zip
+        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.0.0.zip
       - name: Launch app smoke test
         run: bash Scripts/smoke-test.sh
       - name: Put a skin icon on the app in Finder and take it off
@@ -57,10 +57,10 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
-          name: Levant-${{ github.run_number }}
+          name: EchoNyla-${{ github.run_number }}
           path: |
-            dist/Levant-2.8.0.zip
-            dist/Levant-2.8.0.zip.sha256
+            dist/EchoNyla-3.0.0.zip
+            dist/EchoNyla-3.0.0.zip.sha256
             dist/signing.txt
           if-no-files-found: error
           retention-days: 30
@@ -102,7 +102,7 @@ jobs:
     timeout-minutes: 15
     # One release at a time; a newer run waits instead of racing an older one.
     concurrency:
-      group: levant-release
+      group: echonyla-release
       cancel-in-progress: false
     permissions:
       contents: write
@@ -162,7 +162,7 @@ jobs:
         if: steps.existing.outputs.released == 'false'
         uses: actions/download-artifact@v8
         with:
-          name: Levant-${{ github.run_number }}
+          name: EchoNyla-${{ github.run_number }}
           path: release
       - name: Check the download, its signing and its update key
         if: steps.existing.outputs.released == 'false'
@@ -172,7 +172,7 @@ jobs:
           BUILD: ${{ steps.version.outputs.build }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          zip="Levant-$VERSION.zip"
+          zip="EchoNyla-$VERSION.zip"
           sha256sum -c "$zip.sha256"
           cat signing.txt
           mode="$(sed -n 's/^mode=//p' signing.txt)"
@@ -180,9 +180,9 @@ jobs:
           case "$mode" in
             self-signed) ;;
             developer-id) [ "$notarized" = "yes" ] || { echo "Developer ID builds must be notarized before release."; exit 1; } ;;
-            *) echo "Releases need a real signing identity so macOS keeps Levant's permissions; this build is $mode-signed."; exit 1 ;;
+            *) echo "Releases need a real signing identity so macOS keeps EchoNyla's permissions; this build is $mode-signed."; exit 1 ;;
           esac
-          unzip -p "$zip" "Levant.app/Contents/Info.plist" > shipped-Info.plist
+          unzip -p "$zip" "EchoNyla.app/Contents/Info.plist" > shipped-Info.plist
           read -r shipped_version shipped_build shipped_key < <(python3 -c "import plistlib; d = plistlib.load(open('shipped-Info.plist', 'rb')); print(d['CFBundleShortVersionString'], d['CFBundleVersion'], d['SUPublicEDKey'])")
           [ "$shipped_version" = "$VERSION" ] && [ "$shipped_build" = "$BUILD" ]
           signing_key="$(python3 -I ../Scripts/release/sparkle_release.py public-key --seed-env SPARKLE_PRIVATE_KEY)"
@@ -199,7 +199,7 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           tool="python3 -I Scripts/release/sparkle_release.py"
-          zip="Levant-$VERSION.zip"
+          zip="EchoNyla-$VERSION.zip"
           notes="docs/releases/$VERSION.md"
           [ -f "$notes" ] || { echo "Missing $notes"; exit 1; }
           if [ -f current-appcast.xml ]; then
@@ -209,7 +209,7 @@ jobs:
           signature="$($tool sign --seed-env SPARKLE_PRIVATE_KEY "release/$zip")"
           $tool verify --public-key "$public_key" "release/$zip" "$signature"
           printf '%s\n' "$signature" > "release/$zip.sig"
-          $tool feed --app-name "Levant" --version "$VERSION" --build "$BUILD" \
+          $tool feed --app-name "EchoNyla" --version "$VERSION" --build "$BUILD" \
             --url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/$zip" \
             --archive "release/$zip" --signature "$signature" --minimum-system 26.0 \
             --notes "$notes" --output release/appcast.xml
@@ -220,10 +220,10 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          zip="Levant-$VERSION.zip"
+          zip="EchoNyla-$VERSION.zip"
           notes="docs/releases/$VERSION.md"
           gh release create "v$VERSION" "release/$zip" "release/$zip.sha256" "release/$zip.sig" release/appcast.xml \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Levant $VERSION" --notes-file "$notes" --latest=false
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "EchoNyla $VERSION" --notes-file "$notes" --latest=false
       - name: Check the public download, then add it to the feed
         if: steps.existing.outputs.advertised == 'false'
         env:
@@ -231,7 +231,7 @@ jobs:
           BUILD: ${{ steps.version.outputs.build }}
         run: |
           tool="python3 -I Scripts/release/sparkle_release.py"
-          zip="Levant-$VERSION.zip"
+          zip="EchoNyla-$VERSION.zip"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION"
           mkdir -p public
           # Anyone can download it, logged out, and it's byte-for-byte the tested app.
@@ -239,7 +239,7 @@ jobs:
           curl -fsSL -o "public/$zip.sha256" "$base/$zip.sha256"
           curl -fsSL -o public/appcast.xml "$base/appcast.xml"
           (cd public && sha256sum -c "$zip.sha256")
-          unzip -p "public/$zip" "Levant.app/Contents/Info.plist" > public/Info.plist
+          unzip -p "public/$zip" "EchoNyla.app/Contents/Info.plist" > public/Info.plist
           public_key="$(python3 -c "import plistlib; print(plistlib.load(open('public/Info.plist', 'rb'))['SUPublicEDKey'])")"
           $tool verify-feed --public-key "$public_key" public/appcast.xml
           [ "$($tool feed-build public/appcast.xml)" = "$BUILD" ]

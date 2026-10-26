@@ -1,22 +1,39 @@
 #!/usr/bin/env python3
 """Checks Resources/AppIcon.icon/icon.json before the icon is compiled.
 
-In an Icon Composer file the FIRST group and the FIRST layer are the FRONT-most. Levant's
-2.2.0 icon came out black because the full-size dark bezel was listed first and covered everything.
-Apple's compiler also allows at most four groups ("Too many visible groups", 2.3.0's first CI run).
-This fails if that order is wrong, there are more than four groups, a named image is missing, or a file
-in Assets/ isn't used.
+In an Icon Composer file the FIRST group and the FIRST layer are the FRONT-most (an earlier icon of
+this app came out black because a full-size dark layer was listed first). Apple's compiler also allows
+at most four groups. This fails if that order is wrong, there are more than four groups, a named image
+is missing, or a file in Assets/ isn't used. It also checks the skin icons, the Apple Intelligence
+loops and every bundled file-type icon exist.
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 ICON = Path(__file__).resolve().parent.parent / "Resources" / "AppIcon.icon"
-FRONT_TO_BACK = ["lip", "chevron", "glass", "slot", "ticks", "chamber", "bezel"]
-SKINS = ["slate", "oyster", "sky", "submariner", "turquoise", "bordeaux", "wisteria", "mint"]
+FRONT_TO_BACK = ["glyph"]
+# Verbyn's skins except Signature, whose icon is the app's own.
+SKINS = ["sky", "green", "turquoise", "bordeaux", "wisteria"]
 MAX_GROUPS = 4
+
+
+def file_type_problems() -> list[str]:
+    """Every icon named in Sources/EchoNylaCore/FileTypes.swift is in Resources/FileTypes, and nothing else is."""
+    source = (ICON.parent.parent / "Sources" / "EchoNylaCore" / "FileTypes.swift").read_text()
+    names = set(re.findall(r'\("([a-z_]+)", "', source))
+    light = set(re.findall(r'"([a-z_]+)"', re.search(r"lightVersions: Set<String> = \[([^\]]*)\]", source).group(1)))
+    wanted = {f"{name}.png" for name in names} | {f"{name}-light.png" for name in light} | {"LICENSE.txt"}
+    folder = ICON.parent / "FileTypes"
+    have = {path.name for path in folder.iterdir()}
+    problems = [f"missing Resources/FileTypes/{name}" for name in sorted(wanted - have)]
+    problems += [f"Resources/FileTypes/{name} is not used" for name in sorted(have - wanted)]
+    if len(names) < 50:
+        problems.append(f"only {len(names)} file-type icons found in FileTypes.swift")
+    return problems
 
 
 def main() -> int:
@@ -39,8 +56,12 @@ def main() -> int:
     for skin in SKINS:
         if not (skin_icons / f"icon-{skin}.png").is_file():
             problems.append(f"missing Resources/SkinIcons/icon-{skin}.png")
-    if not (ICON.parent / "IntelligenceMark.png").is_file():
-        problems.append("missing Resources/IntelligenceMark.png")
+    for path in sorted(skin_icons.iterdir()):
+        if path.stem.removeprefix("icon-") not in SKINS:
+            problems.append(f"Resources/SkinIcons/{path.name} is not a skin")
+    if not (ICON.parent / "IntelligenceLoops.png").is_file():
+        problems.append("missing Resources/IntelligenceLoops.png")
+    problems += file_type_problems()
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if not problems:
