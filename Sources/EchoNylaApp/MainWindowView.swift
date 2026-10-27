@@ -299,7 +299,7 @@ struct IntelligenceCard: View {
         HStack(spacing: 10) {
             tile(available: available)
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.usesLocalModel ? "Bonsai 2 9B" : "Apple Intelligence")
+                Text("Apple Intelligence")
                     .font(.system(size: 12.5, weight: .semibold))
                 Text(model.aiUnavailableReason ?? "On-device, private to this Mac")
                     .font(.system(size: 10.5))
@@ -323,6 +323,7 @@ struct IntelligenceCard: View {
 
 struct ActivityTab: View {
     @Environment(AppModel.self) private var model
+    @State private var confirmNames = false
 
     var body: some View {
         Page(title: "Activity", subtitle: "Everything EchoNyla moved, renamed or suggested. Anything it did can be undone.",
@@ -340,7 +341,21 @@ struct ActivityTab: View {
             let waiting = model.openSuggestions
             if !waiting.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    DayLabel("Waiting for you")
+                    HStack {
+                        DayLabel("Waiting for you")
+                        Spacer()
+                        if model.waitingNameCount > 1 {
+                            Button("Approve All \(model.waitingNameCount) Names") { confirmNames = true }
+                                .buttonStyle(.pill)
+                                .confirmationDialog("Rename all \(model.waitingNameCount) waiting files?", isPresented: $confirmNames,
+                                                    titleVisibility: .visible) {
+                                    Button("Rename All") { model.applyAllWaitingNames() }
+                                    Button("Cancel", role: .cancel) {}
+                                } message: {
+                                    Text("Each file gets the name shown under it and stays where it is. Each rename can be undone in Activity.")
+                                }
+                        }
+                    }
                     Caption("New files EchoNyla wasn't sure about. Nothing moves until you click.")
                     ForEach(waiting) { entry in
                         ActivityRow(entry: entry)
@@ -447,6 +462,7 @@ struct CleanUpTab: View {
     @State private var confirmMove = false
     @State private var confirmSure = false
     @State private var confirmTrash = false
+    @State private var confirmUnsureNames = false
 
     private var emptyHint: String {
         "Press \(model.cleanupButtonTitle), or choose another folder."
@@ -486,6 +502,7 @@ struct CleanUpTab: View {
                 bucketSection(.none)
                 groupsSection
                 trashSection
+                unsureNamesBar
                 approveBar
             }
         }
@@ -618,6 +635,26 @@ struct CleanUpTab: View {
         }
     }
 
+    /// Approve All for the names it isn't sure about, after you've looked them over.
+    @ViewBuilder
+    private var unsureNamesBar: some View {
+        let count = model.unsureCleanupNameCount
+        if count > 0 {
+            HStack {
+                Caption("\(count) name\(count == 1 ? "" : "s") Apple Intelligence isn't sure about (marked “not sure”). Look them over, then approve them all at once.")
+                Spacer()
+                Button("Approve All \(count) Not-Sure Name\(count == 1 ? "" : "s")") { confirmUnsureNames = true }
+                    .buttonStyle(.pill)
+                    .confirmationDialog("Rename \(count) file\(count == 1 ? "" : "s")?", isPresented: $confirmUnsureNames, titleVisibility: .visible) {
+                        Button("Rename All") { model.approveUnsureCleanupNames() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Each file gets the name shown under it and stays where it is. Undo Last Move puts the names back.")
+                    }
+            }
+        }
+    }
+
     private var approveBar: some View {
         HStack {
             Caption("\(model.selectedMoveCount) to move · \(model.selectedRenameCount) to rename · Undo Last Move reverses all of it")
@@ -688,7 +725,7 @@ struct CleanupRowView: View {
                     Caption(summary)
                 }
                 if let proposed = row.proposedName {
-                    Toggle("Rename to “\(proposed)”", isOn: Binding(
+                    Toggle("Rename to “\(proposed)”" + (row.nameIsSure ? "" : " (not sure)"), isOn: Binding(
                         get: { row.renameSelected },
                         set: { model.setRenameSelected(entryID: row.id, selected: $0) }
                     ))
@@ -883,7 +920,7 @@ struct FoldersTab: View {
 }
 
 /// One favorite folder: Sort into this or Just for dragging, and for Sort-into folders the note and
-/// what Bonsai learned from the files in it.
+/// what was learned from the files in it.
 struct FavoriteFolderRow: View {
     @Environment(AppModel.self) private var model
     let folder: FavoriteFolder
@@ -911,7 +948,7 @@ struct FavoriteFolderRow: View {
                     .buttonStyle(.borderless)
             }
             if folder.isSortTarget {
-                TextField("What goes here? (Bonsai can write this from the files in it)", text: Binding(
+                TextField("What goes here? (Learn From Its Files can write this)", text: Binding(
                     get: { folder.purpose ?? "" },
                     set: { model.setFolderPurpose(id: folder.id, to: $0) }
                 ))
@@ -920,15 +957,13 @@ struct FavoriteFolderRow: View {
                 HStack(spacing: 10) {
                     Caption(learnedText)
                     Spacer()
-                    if model.usesLocalModel {
-                        Button(folder.learnedAt == nil ? "Learn From Its Files" : "Learn Again") { model.learnFolder(id: folder.id) }
+                    Button(folder.learnedAt == nil ? "Learn From Its Files" : "Learn Again") { model.learnFolder(id: folder.id) }
+                        .buttonStyle(.borderless)
+                        .disabled(!model.aiReady || model.learningFolderID != nil)
+                    if model.checkableFolders.contains(where: { $0.id == folder.id }) {
+                        Button("Check This Folder") { model.checkFolder(id: folder.id) }
                             .buttonStyle(.borderless)
-                            .disabled(model.learningFolderID != nil)
-                        if model.checkableFolders.contains(where: { $0.id == folder.id }) {
-                            Button("Check This Folder") { model.checkFolder(id: folder.id) }
-                                .buttonStyle(.borderless)
-                                .disabled(!model.aiReady || model.folderCheckProgress != nil)
-                        }
+                            .disabled(!model.aiReady || model.folderCheckProgress != nil)
                     }
                 }
                 .padding(.leading, 30)
@@ -941,9 +976,9 @@ struct FavoriteFolderRow: View {
     }
 
     private var learnedText: String {
-        if model.learningFolderID == folder.id { return "Bonsai is looking at the files in it…" }
+        if model.learningFolderID == folder.id { return "Apple Intelligence is looking at the files in it…" }
         guard let date = folder.learnedAt else {
-            return model.usesLocalModel ? "Bonsai hasn't looked at its files yet." : "\(model.modelName) uses the note to decide what goes here."
+            return "Apple Intelligence hasn't looked at its files yet; it uses the note to decide what goes here."
         }
         let count = folder.learnedFrom ?? 0
         return "Learned from \(count) file\(count == 1 ? "" : "s") on \(date.formatted(date: .abbreviated, time: .omitted))."
@@ -1029,7 +1064,7 @@ struct SettingsTab: View {
             GroupBox("Moving files") {
                 VStack(alignment: .leading, spacing: 8) {
                     SettingToggle("Move files it's sure about by itself (with Undo)", isOn: $model.autoMove)
-                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you; Bonsai's sure renames don't (see On-device model). This also applies to Deep Reorganize.")
+                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you; sure renames of names that said nothing don't (see Apple Intelligence). This also applies to Deep Reorganize.")
                     SettingToggle("Show a notification for each automatic move or suggestion", isOn: $model.notificationsEnabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1099,7 +1134,7 @@ struct SettingsTab: View {
             }
             GroupBox("Privacy and safety") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("Files, names, contents, rules and learning stay on this Mac. EchoNyla has no analytics. It only goes online to check for a new version of itself (GitHub) and, if you ask, to download Bonsai (Hugging Face).", systemImage: "lock.shield")
+                    Label("Files, names, contents, rules and learning stay on this Mac. EchoNyla has no analytics. It only goes online to check for a new version of itself (GitHub). macOS may download Apple's own speech recognition for your language the first time it listens to a recording.", systemImage: "lock.shield")
                         .fixedSize(horizontal: false, vertical: true)
                     Label("Nothing is ever permanently deleted. Every move and rename can be undone from Activity or Undo Last Move.", systemImage: "arrow.uturn.backward.circle")
                         .fixedSize(horizontal: false, vertical: true)

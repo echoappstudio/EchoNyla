@@ -3,11 +3,11 @@ import Foundation
 public struct Destination: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var name: String
-    /// The note on what goes in this folder (yours, or written by Bonsai from the files in it).
+    /// The note on what goes in this folder (yours, or written by Apple Intelligence from the files in it).
     public var purpose: String?
     /// "Sort into this": the models may file things here. Off means "Just for dragging".
     public var sortsInto: Bool
-    /// Stems of the words Bonsai learned from the files already in the folder.
+    /// Stems of the words learned from the files already in the folder.
     public var learnedWords: [String]
 
     /// `sortsInto` defaults to whether the folder has a note, as it worked before 3.2.0.

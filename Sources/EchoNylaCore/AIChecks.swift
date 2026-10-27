@@ -1,6 +1,6 @@
 import Foundation
 
-/// Apple Intelligence's checked answer about one file.
+/// The model's checked answer about one file.
 public struct FileDecision: Equatable, Sendable {
     /// One of your folders, or nil when it had no good match.
     public var destinationID: String?
@@ -51,17 +51,6 @@ public enum DecisionCheck {
             .filter { $0.name.compare(clean, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
         guard matches.count == 1, let match = matches.first else { return nil }
         return match
-    }
-
-    public static func check(folder: String, confidence: String, reason: String, betterName: String, summary: String,
-                             fileName: String, destinations: [Destination], locked: Set<String>) -> FileDecision {
-        // A folder is kept only when the model is sure; a guess is no suggestion at all.
-        let sure = confidence.lowercased().contains("high")
-        let match = sure ? Self.destination(for: folder, destinations: destinations, locked: locked) : nil
-        return FileDecision(destinationID: match?.id, isConfident: match != nil,
-                            reason: oneLine(reason, limit: 160, fallback: "Apple Intelligence's best match."),
-                            proposedName: RenameCheck.acceptedName(original: fileName, proposed: betterName),
-                            summary: oneLine(summary, limit: 300, fallback: ""))
     }
 
     public static func oneLine(_ text: String, limit: Int, fallback: String) -> String {
@@ -181,7 +170,7 @@ public enum GroupCheck {
     }
 }
 
-/// The prompt for one file: its facts, the folders you described, and how you filed similar files before.
+/// How you filed similar files before, for the question about one file.
 public enum DecisionPrompt {
     /// Your latest moves as examples. Names that say nothing ("Screenshot 2026-10-25 at 12.33.39 AM")
     /// are left out: they only teach "screenshots went there", which pulled every screenshot into one
@@ -201,23 +190,5 @@ public enum DecisionPrompt {
             lines.append("“\(TextTools.redactLongNumbers(sample))” → \(folder.name)")
         }
         return lines
-    }
-
-    public static func make(facts: FileFacts, destinations: [Destination], locked: Set<String>, examples: [String]) -> String {
-        let allowed = AIFolders.choosable(destinations, locked: locked)
-        var lines = ["Decide whether this file belongs in one of the person's folders.", facts.promptText()]
-        if allowed.isEmpty {
-            lines.append("There are no folders to choose from. Answer none for the folder.")
-        } else {
-            lines.append("Folders you may choose (exact name: what goes there):")
-            lines += allowed.map(AIFolders.line)
-            if !examples.isEmpty {
-                lines.append("How this person filed files before:")
-                lines += examples.map { "- " + $0 }
-            }
-            lines.append("Choose a folder only if this file is plainly what that folder's description says. Being about a similar "
-                         + "subject is not enough. Most files fit no folder: then answer none.")
-        }
-        return lines.joined(separator: "\n")
     }
 }

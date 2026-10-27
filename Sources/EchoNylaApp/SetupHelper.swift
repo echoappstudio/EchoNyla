@@ -35,9 +35,7 @@ struct SetupHelperView: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 PageTitle("Suggested folders")
-                Caption(model.usesLocalModel
-                        ? "Folders in Documents and on your Desktop that you keep files in. Tick the ones to add. \"Sort into this\" folders get files from Bonsai, which learns what goes in each from the files already there. \"Just for dragging\" folders are quick places to drop things."
-                        : "Folders in Documents and on your Desktop that you keep files in. Tick the ones to add. \"Sort into this\" folders get files from Apple Intelligence when they plainly match the note, so edit the notes freely. \"Just for dragging\" folders are quick places to drop things.")
+                Caption("Folders in Documents and on your Desktop that you keep files in. Tick the ones to add. \"Sort into this\" folders get files from Apple Intelligence when they plainly match the note, and it learns what goes in each from the files already there. Edit the notes freely. \"Just for dragging\" folders are quick places to drop things.")
             }
             if model.isPreparingSetup {
                 HStack(spacing: 8) {
@@ -113,7 +111,7 @@ struct SetupCandidateRow: View {
                     .fixedSize()
                     .controlSize(.small)
                 }
-                if candidate.sortsInto && !model.usesLocalModel {
+                if candidate.sortsInto {
                     HStack(spacing: 6) {
                         TextField("What goes here? (optional)", text: Binding(
                             get: { candidate.note },
@@ -125,8 +123,6 @@ struct SetupCandidateRow: View {
                                 .help("Apple Intelligence is writing a note")
                         }
                     }
-                } else if candidate.sortsInto {
-                    Caption("Bonsai learns what goes here from its files after you add it.")
                 }
             }
         }

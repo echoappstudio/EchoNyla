@@ -3,40 +3,25 @@ import CryptoKit
 import Foundation
 import Observation
 import EchoNylaCore
-import EchoNylaEngine
 
 struct FavoriteFolder: Codable, Equatable, Identifiable {
     var id: String
     var name: String
     var bookmarkData: Data
-    /// "What goes here": yours, or written by Bonsai from the files in it.
+    /// "What goes here": yours, or written by Apple Intelligence from the files in it.
     var purpose: String?
     /// "Sort into this" (true) or "Just for dragging" (false). Nil for folders saved before 3.2.0,
     /// where a note meant the models could file into it.
     var sortsInto: Bool?
-    /// What Bonsai learned from the files already in the folder (word stems), and when.
+    /// What was learned from the files already in the folder (word stems), and when.
     var learnedWords: [String]?
     var learnedAt: Date?
     var learnedFrom: Int?
-    /// The note was written by Bonsai, so learning again may replace it. Your own notes are kept.
+    /// The note was written from the folder's files, so learning again may replace it. Your own notes
+    /// are kept. (Saved under this name since 3.2.0, when Bonsai wrote these notes.)
     var noteByBonsai: Bool?
 
     var isSortTarget: Bool { sortsInto ?? (Destination.cleanPurpose(purpose) != nil) }
-}
-
-/// Which on-device model judges files.
-enum ModelChoice: String {
-    /// Ternary Bonsai 2 9B on the built-in engine: sees pictures, renames and sorts by itself when sure.
-    case bonsai
-    /// Apple Intelligence (FoundationModels).
-    case apple
-}
-
-enum LocalModelState: Equatable {
-    case notInstalled
-    case downloading(Double)
-    case installed
-    case failed(String)
 }
 
 /// A file Check This Folder wasn't sure about, for you to decide.
@@ -57,7 +42,7 @@ struct RecentCleanupFolder: Codable, Equatable {
 
 struct CleanupEntry: Identifiable {
     var id: String { url.path }
-    let url: URL
+    var url: URL
     var destinationID: String?
     /// A folder picked with Any Folder… (not a favorite); used instead of `destinationID`.
     var chosenFolder: URL?
@@ -69,8 +54,8 @@ struct CleanupEntry: Identifiable {
     /// A clearer name from Apple Intelligence, applied only when `renameSelected` is on.
     var proposedName: String?
     var renameSelected = false
-    /// The on-device model is sure about the new name: it's checked and applied with the sure changes.
-    var renameIsSure = false
+    /// The new name is sure: it's checked and applied with the sure changes.
+    var nameIsSure = false
     var summary: String?
 
     var hasTarget: Bool { destinationID != nil || chosenFolder != nil }
@@ -132,12 +117,11 @@ final class AppModel {
     /// Folders you cleaned, newest first; the first is where Clean Up starts after a relaunch.
     private(set) var recentCleanupFolders: [URL] = []
 
-    private(set) var localModelState: LocalModelState = .notInstalled
-    /// How sure the on-device model must be before EchoNyla moves or renames by itself.
+    /// How sure Apple Intelligence must be before EchoNyla moves or renames by itself.
     let confidenceBar = ConfidenceBar.standard
     private(set) var folderCheckProgress: String?
     private(set) var folderCheckFindings: [FolderCheckFinding] = []
-    /// The folder Bonsai is learning from its files, and how far it got.
+    /// The folder being learned from its files, and how far it got.
     private(set) var learningFolderID: String?
     private(set) var folderLearnProgress: String?
 
@@ -147,9 +131,13 @@ final class AppModel {
     private(set) var reorganizeStatus: ReorganizeStatus = .idle
     private(set) var reorganizeDone = 0
     private(set) var reorganizeTotal = 0
+    /// Files the latest run left out because they were already looked at.
+    private(set) var reorganizeSkipped = 0
     private(set) var reorganizeCurrent: String?
     private(set) var reorganizeTimeLeft: String?
     private(set) var reorganizeItems: [ReorganizeItem] = []
+    /// Files of the run with nothing left to do (named, no folder to suggest), for suggesting new folders.
+    @ObservationIgnored private var reorganizeSettled: [ReorganizeItem] = []
     private(set) var reorganizeGroups: [ReorganizeGroup] = []
     private(set) var reorganizeDuplicates: [ReorganizeDuplicate] = []
     /// The latest run's changes, for Undo All (kept on disk).
@@ -179,7 +167,6 @@ final class AppModel {
     private var storedWatchDesktop: Bool
     private var storedAIGroups: Bool
     private var storedTidyReminder: Bool
-    private var storedModelChoice: ModelChoice
 
     var aiEnabled: Bool {
         get { storedAIEnabled }
@@ -210,12 +197,6 @@ final class AppModel {
         get { storedTidyReminder }
         set { storedTidyReminder = newValue; defaults.set(newValue, forKey: Keys.tidyReminder); refreshTidyReminder() }
     }
-    /// Which model judges files. Bonsai is used once it's downloaded; until then, Apple Intelligence.
-    var modelChoice: ModelChoice {
-        get { storedModelChoice }
-        set { storedModelChoice = newValue; defaults.set(newValue.rawValue, forKey: Keys.modelChoice) }
-    }
-
     /// Apple Intelligence's new-folder suggestions in Clean Up. Off unless you turn it on.
     var aiGroupsEnabled: Bool {
         get { storedAIGroups }
@@ -257,9 +238,6 @@ final class AppModel {
     /// The Apple Intelligence review of Clean Up that's running. Each new one replaces the last.
     @ObservationIgnored private var cleanupReview: Task<Void, Never>?
     @ObservationIgnored private var cleanupReviewRun = 0
-    @ObservationIgnored private let installer = ModelInstaller(spec: .bonsai9B)
-    @ObservationIgnored private var localPaths: ModelPaths?
-    @ObservationIgnored private var installTask: Task<Void, Never>?
     @ObservationIgnored private var folderCheckTask: Task<Void, Never>?
     @ObservationIgnored private var folderLearnQueue: [String] = []
     @ObservationIgnored private var folderLearnTask: Task<Void, Never>?
@@ -305,7 +283,6 @@ final class AppModel {
         storedWatchDesktop = flag(Keys.watchDesktop)
         storedAIGroups = defaults.object(forKey: Keys.aiGroups) as? Bool ?? false
         storedTidyReminder = flag(Keys.tidyReminder)
-        storedModelChoice = defaults.string(forKey: Keys.modelChoice).flatMap(ModelChoice.init(rawValue:)) ?? .bonsai
         renamePendingFirst = defaults.bool(forKey: Keys.renameFirst)
         minimumRelatedFileCount = groupingSettings.minimumRelatedFiles
         favoriteFolders = Self.decode([FavoriteFolder].self, key: Keys.folders, defaults: defaults) ?? []
@@ -321,8 +298,19 @@ final class AppModel {
         reorganizeFolders = Self.decode([ReorganizeFolder].self, key: Keys.reorganizeFolders, defaults: defaults) ?? []
         reorganizeSkipFolders = Self.decode([ReorganizeFolder].self, key: Keys.reorganizeSkipFolders, defaults: defaults) ?? []
         reorganizeRun = ReorganizeRun.load()
-        localPaths = installer.installed()
-        localModelState = localPaths == nil ? .notInstalled : .installed
+        reviewedFiles = ReviewedFiles.load()
+        reviewedCount = reviewedFiles.count
+        defaults.removeObject(forKey: Keys.modelChoice)
+        Self.removeBonsaiDownload()
+    }
+
+    /// EchoNyla used to run Bonsai, a 3.2 GB download; since 3.3.0 it uses Apple Intelligence only,
+    /// so the download is deleted. Only EchoNyla's own Models folder is touched.
+    private static func removeBonsaiDownload() {
+        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let models = support.appendingPathComponent("EchoNyla/Models", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: models.path) else { return }
+        Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: models) }
     }
 
     func start() {
@@ -351,18 +339,14 @@ final class AppModel {
         SuggestionEngine.ruleLockedDestinationIDs(rules: rules, destinations: destinations)
     }
 
-    /// nil when a model can be used; otherwise why not.
+    /// nil when Apple Intelligence can be used; otherwise why not.
     var aiUnavailableReason: String? {
         if !aiEnabled { return "AI is turned off in EchoNyla's settings." }
-        if usesLocalModel { return nil }
         return OnDeviceModel.unavailableReason
     }
 
-    /// True when Bonsai is chosen and downloaded.
-    var usesLocalModel: Bool { modelChoice == .bonsai && localPaths != nil }
-
     /// The model's name, for reasons and status lines.
-    var modelName: String { usesLocalModel ? "Bonsai" : "Apple Intelligence" }
+    let modelName = "Apple Intelligence"
 
     var aiReady: Bool { aiUnavailableReason == nil }
 
@@ -397,9 +381,14 @@ final class AppModel {
     }
 
     /// Checked sure changes, for the Sure part's Approve button: moves in the Sure part, plus
-    /// renames the on-device model is sure about (anywhere in Clean Up).
+    /// sure renames (anywhere in Clean Up).
     var selectedSureCount: Int {
-        cleanupRows.filter { ($0.bucket == .sure && $0.isSelected && $0.hasTarget) || ($0.renameIsSure && $0.renameSelected) }.count
+        cleanupRows.filter { ($0.bucket == .sure && $0.isSelected && $0.hasTarget) || ($0.nameIsSure && $0.renameSelected) }.count
+    }
+
+    /// Names in Clean Up that Apple Intelligence isn't sure about (50 to 74), for their Approve All.
+    var unsureCleanupNameCount: Int {
+        cleanupRows.filter { $0.proposedName != nil && !$0.nameIsSure }.count
     }
 
     func cleanupRows(in bucket: CleanupBucket) -> [CleanupEntry] {
@@ -448,15 +437,15 @@ final class AppModel {
         guard let index = favoriteFolders.firstIndex(where: { $0.id == id }) else { return }
         favoriteFolders[index].sortsInto = sortsInto
         persist(favoriteFolders, key: Keys.folders)
-        if sortsInto, favoriteFolders[index].learnedAt == nil, usesLocalModel { learnFolder(id: id) }
+        if sortsInto, favoriteFolders[index].learnedAt == nil, aiReady { learnFolder(id: id) }
     }
 
     // MARK: Learning a folder from its files
 
-    /// Bonsai looks at up to 12 files already in the folder and writes down what they are: words it
-    /// matches new files against, and a note (unless you wrote your own).
+    /// Apple Intelligence looks at up to 12 files already in the folder and writes down what they
+    /// are: words it matches new files against, and a note (unless you wrote your own).
     func learnFolder(id: String) {
-        guard usesLocalModel, !folderLearnQueue.contains(id), learningFolderID != id else { return }
+        guard aiReady, !folderLearnQueue.contains(id), learningFolderID != id else { return }
         folderLearnQueue.append(id)
         guard folderLearnTask == nil else { return }
         folderLearnTask = Task {
@@ -480,41 +469,45 @@ final class AppModel {
     }
 
     private func learn(folderID id: String) async {
-        guard let folder = favoriteFolders.first(where: { $0.id == id }), let url = resolvedURL(for: id), let paths = localPaths else { return }
+        guard let folder = favoriteFolders.first(where: { $0.id == id }), let url = resolvedURL(for: id) else { return }
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         let files = looseFiles(in: url, limit: FolderProfile.sampleSize)
         guard !files.isEmpty else {
-            statusMessage = "\(folder.name) has no files for Bonsai to learn from yet."
+            statusMessage = "\(folder.name) has no files to learn from yet."
             return
         }
         var descriptions: [String] = []
         var samples: [String] = []
-        let preparer = FilePreparer(readContents: readContents, withPicture: true)
+        let preparer = FilePreparer(readContents: readContents)
+        let instructions = ModelPrompt.instructions(destinations: [], locked: [])
+        let warm = OnDeviceModel.warmUp(instructions: instructions)
         for (number, file) in files.enumerated() {
             if Task.isCancelled { return }
             folderLearnProgress = "Learning \(folder.name): \(number + 1) of \(files.count)…"
             let prepared = await preparer.prepare(file, next: files.indices.contains(number + 1) ? files[number + 1] : nil)
-            let question = LocalQuestion(facts: prepared.facts, picture: prepared.picture, destinations: [], locked: [])
-            guard let result = try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar) else { continue }
-            descriptions.append(result.answer.whatItIs)
-            samples.append(result.answer.whatItIs + " " + result.answer.name)
+            let question = OnDeviceModel.FileQuestion(facts: prepared.facts, picture: prepared.picture, instructions: instructions,
+                                                      folderNames: [], currentFolderName: nil, examples: [])
+            guard let answer = try? await OnDeviceModel.ask(question) else { continue }
+            descriptions.append(answer.whatItIs)
+            samples.append(answer.whatItIs + " " + answer.name)
         }
+        withExtendedLifetime(warm) {}
         guard !Task.isCancelled, !descriptions.isEmpty else { return }
         folderLearnProgress = "Writing a note for \(folder.name)…"
         let prompt = FolderProfile.notePrompt(folderName: folder.name, descriptions: descriptions)
-        let reply = try? await LlamaEngine.shared.generate(paths: paths, prompt: prompt, image: nil, grammar: FolderProfile.noteGrammar)
+        let reply = try? await OnDeviceModel.learnedNote(prompt)
         guard let index = favoriteFolders.firstIndex(where: { $0.id == id }) else { return }
         favoriteFolders[index].learnedWords = FolderProfile.words(samples: samples)
         favoriteFolders[index].learnedAt = Date()
         favoriteFolders[index].learnedFrom = descriptions.count
         let ownNote = favoriteFolders[index].noteByBonsai != true && Destination.cleanPurpose(favoriteFolders[index].purpose) != nil
-        if !ownNote, let note = reply.flatMap({ FolderProfile.parseNote($0.text) }) {
+        if !ownNote, let note = reply.flatMap({ SetupSuggestions.cleanNote($0) }) {
             favoriteFolders[index].purpose = note
             favoriteFolders[index].noteByBonsai = true
         }
         persist(favoriteFolders, key: Keys.folders)
-        statusMessage = "Bonsai learned \(folder.name) from \(descriptions.count) file\(descriptions.count == 1 ? "" : "s")."
+        statusMessage = "Learned \(folder.name) from \(descriptions.count) file\(descriptions.count == 1 ? "" : "s")."
     }
 
     func removeFavorite(id: String) {
@@ -694,7 +687,7 @@ final class AppModel {
     }
 
     /// After a rule or learned pattern moved a file, the model still offers a clearer name, and
-    /// Bonsai applies it by itself when it's sure.
+    /// applies it by itself when it's sure and the old name said nothing.
     private func enrichAfterMove(_ entryID: UUID, url: URL, destinationID: String) async {
         let facts = await FileInspector.facts(for: url, readContents: readContents)
         guard let judged = await judge(url, facts: facts) else { return }
@@ -703,7 +696,7 @@ final class AppModel {
         activity[index].proposedName = decision.proposedName
         activity[index].summary = decision.summary.isEmpty ? nil : decision.summary
         persist(activity, key: Keys.activity)
-        if judged.renameIsSure, decision.proposedName != nil { applyProposedName(entryID, automatic: true) }
+        if judged.renamesByItself, decision.proposedName != nil { applyProposedName(entryID, automatic: true) }
     }
 
     func undoLastMove() {
@@ -741,6 +734,18 @@ final class AppModel {
             if receipts.contains(receipt) || renamedAfterMove { activity[index].isUndone = true }
         }
         persist(activity, key: Keys.activity)
+    }
+
+    /// Waiting files in Activity that have a suggested name.
+    var waitingNameCount: Int {
+        openSuggestions.filter { $0.proposedName != nil }.count
+    }
+
+    /// Approve All for the waiting names in Activity: each file is renamed where it is; its folder still waits.
+    func applyAllWaitingNames() {
+        let ids = openSuggestions.filter { $0.proposedName != nil }.map(\.id)
+        for id in ids { applyProposedName(id) }
+        if ids.count > 1 { statusMessage = "Renamed \(ids.count) files." }
     }
 
     /// Applies the proposed name to a file in Activity (by itself when `automatic`).
@@ -829,8 +834,8 @@ final class AppModel {
     struct Evaluation {
         let decision: AutoMoveDecision
         let ai: FileDecision?
-        /// The on-device model is sure about the new name, so it's applied without asking.
-        var renameIsSure = false
+        /// The new name is sure and the old one said nothing, so it's applied without asking.
+        var renamesByItself = false
     }
 
     private func evaluate(_ url: URL) async -> Evaluation {
@@ -848,44 +853,41 @@ final class AppModel {
         let backed = facts.hasContentEvidence || judged?.matchesFolder == true
         let decision = AutoMovePolicy.decide(fileName: fileName, local: local, ai: judged?.decision, aiHadContentEvidence: backed,
                                              autoMoveEnabled: autoMove, locked: locked)
-        return Evaluation(decision: decision, ai: judged?.decision, renameIsSure: judged?.renameIsSure == true)
+        return Evaluation(decision: decision, ai: judged?.decision, renamesByItself: judged?.renamesByItself == true)
     }
 
-    /// The model's checked answer about one file: a folder only when it's sure about one you
-    /// described (and, for Bonsai, the safety net passes), a clearer name, and a summary.
-    /// Bonsai also looks at a picture of the file when its words don't say enough. `currentFolderName`
-    /// is for Check This Folder.
-    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil) async -> LocalDecision? {
-        let picture = usesLocalModel && PictureNeed.wanted(facts) ? await FileInspector.picture(for: url, readContents: readContents) : nil
+    /// Apple Intelligence's checked answer about one file: a folder only when it's sure about one you
+    /// described and the safety net passes, a clearer name, and a summary. On macOS 27 it also looks
+    /// at a picture of the file when its words don't say enough. `currentFolderName` is for Check This Folder.
+    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil) async -> ModelDecision? {
+        let picture = OnDeviceModel.seesPictures && PictureNeed.wanted(facts) ? await FileInspector.picture(for: url, readContents: readContents) : nil
         let prepared = PreparedFile(facts: facts, picture: picture, captured: FileInspector.creationDate(of: url))
         return await judge(url, prepared: prepared, currentFolderName: currentFolderName)
     }
 
     /// `judge` for a file whose facts and picture were read ahead (`FilePreparer`).
-    private func judge(_ url: URL, prepared: PreparedFile, currentFolderName: String? = nil) async -> LocalDecision? {
+    private func judge(_ url: URL, prepared: PreparedFile, currentFolderName: String? = nil) async -> ModelDecision? {
         guard aiReady else { return nil }
         let facts = prepared.facts
         let locked = lockedDestinationIDs
-        if usesLocalModel, let paths = localPaths {
-            let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked)
-            let question = LocalQuestion(facts: facts, picture: prepared.picture, destinations: destinations, locked: locked,
-                                         currentFolderName: currentFolderName, examples: examples, captured: prepared.captured)
-            return try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar).decision
-        }
-        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked)
-        let prompt = DecisionPrompt.make(facts: facts, destinations: destinations, locked: locked, examples: examples)
-        guard let answer = try? await OnDeviceModel.decide(prompt) else { return nil }
-        var decision = DecisionCheck.check(folder: answer.folder, confidence: answer.confidence, reason: answer.reason,
-                                           betterName: answer.betterName, summary: answer.summary, fileName: facts.fileName,
-                                           destinations: destinations, locked: locked)
-        // The same safety net as Bonsai's: a sure answer must also match the folder better than any other.
-        let named = decision.destinationID.flatMap { id in destinations.first { $0.id == id } }
-        let words = FolderMatch.fileWords(evidence: Evidence(facts: facts, description: decision.summary), title: answer.betterName)
-        let match = named.map { FolderMatch.check(named: $0, among: AIFolders.choosable(destinations, locked: locked), fileWords: words) }
-        if match?.passes != true { decision.isConfident = false }
-        // Apple Intelligence's names always wait for you.
-        return LocalDecision(decision: decision, namedFolderID: decision.destinationID, folderConfidence: decision.isConfident ? 100 : 0,
-                             matchesFolder: match?.passes ?? false, renameIsSure: false, sharedWords: match?.shared ?? [])
+        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked, leavingOut: facts.fileName)
+        let question = OnDeviceModel.FileQuestion(facts: facts, picture: prepared.picture, instructions: batchInstructions,
+                                                  folderNames: AIFolders.choosable(destinations, locked: locked).map(\.name),
+                                                  currentFolderName: currentFolderName, examples: examples)
+        guard let answer = try? await OnDeviceModel.ask(question) else { return nil }
+        return ModelDecisionCheck.check(answer, facts: facts, destinations: destinations, locked: locked, bar: confidenceBar,
+                                        captured: prepared.captured)
+    }
+
+    /// The rules and the folders: the same for every file until a folder changes.
+    private var batchInstructions: String {
+        ModelPrompt.instructions(destinations: destinations, locked: lockedDestinationIDs)
+    }
+
+    /// Loads Apple Intelligence before a batch of files. Keep it until the batch is done.
+    private func warmUpModel() -> AnyObject? {
+        guard aiReady else { return nil }
+        return OnDeviceModel.warmUp(instructions: batchInstructions)
     }
 
     /// "What is this file?" for any file.
@@ -1052,12 +1054,12 @@ final class AppModel {
         case .move(let destinationID, let reason):
             let entryID = performMove(url, to: destinationID, kind: .autoMoved, detail: reason, ai: result.ai, enrich: result.ai == nil,
                                       notify: true, runID: run?.id, runTitle: run?.title)
-            if let entryID, result.renameIsSure, result.ai?.proposedName != nil { applyProposedName(entryID, automatic: true) }
+            if let entryID, result.renamesByItself, result.ai?.proposedName != nil { applyProposedName(entryID, automatic: true) }
         case .suggest(let destinationID, let reason):
             // A sure name is applied right away; the folder still waits for you.
             var file = url
             var renamed = false
-            if result.renameIsSure, let name = result.ai?.proposedName,
+            if result.renamesByItself, let name = result.ai?.proposedName,
                let newURL = renameInPlace(url, to: name, automatic: true, runID: run?.id, runTitle: run?.title) {
                 file = newURL
                 renamed = true
@@ -1073,53 +1075,9 @@ final class AppModel {
         }
     }
 
-    // MARK: The on-device model (Bonsai)
-
-    /// Downloads Ternary Bonsai 2 9B (about 3.2 GB, checked) and switches to it.
-    func downloadLocalModel() {
-        guard installTask == nil else { return }
-        localModelState = .downloading(0)
-        let installer = installer
-        let throttle = ProgressThrottle()
-        installTask = Task {
-            do {
-                let paths = try await installer.install { fraction in
-                    guard throttle.shouldReport(fraction) else { return }
-                    Task { @MainActor in AppModel.shared.showDownloadProgress(fraction) }
-                }
-                localPaths = paths
-                localModelState = .installed
-                modelChoice = .bonsai
-            } catch {
-                localModelState = Task.isCancelled ? .notInstalled : .failed(error.localizedDescription)
-            }
-            installTask = nil
-        }
-    }
-
-    private func showDownloadProgress(_ fraction: Double) {
-        if case .downloading = localModelState { localModelState = .downloading(fraction) }
-    }
-
-    func cancelLocalModelDownload() {
-        installTask?.cancel()
-        installTask = nil
-        localModelState = .notInstalled
-    }
-
-    /// Deletes the model's files; EchoNyla goes back to Apple Intelligence.
-    func removeLocalModel() {
-        LlamaEngine.shared.unload()
-        installer.remove()
-        localPaths = nil
-        localModelState = .notInstalled
-    }
-
-    var localModelBytesOnDisk: Int64 { installer.installedBytes() }
-
     // MARK: Check This Folder
 
-    /// Folders Bonsai may check: favorites with a "What goes here" note.
+    /// Folders that can be checked: Sort-into favorites with a note or learned words.
     var checkableFolders: [FavoriteFolder] {
         let allowed = Set(AIFolders.choosable(destinations, locked: lockedDestinationIDs).map(\.id))
         return favoriteFolders.filter { allowed.contains($0.id) }
@@ -1136,8 +1094,7 @@ final class AppModel {
     }
 
     private func startFolderCheck(ids: [String]) {
-        // Bonsai only: Apple Intelligence can't weigh a file against the folder it's already in.
-        guard folderCheckTask == nil, usesLocalModel, aiReady, !ids.isEmpty else { return }
+        guard folderCheckTask == nil, aiReady, !ids.isEmpty else { return }
         folderCheckFindings = []
         folderCheckTask = Task { await runFolderCheck(ids: ids) }
     }
@@ -1154,8 +1111,11 @@ final class AppModel {
             guard let folder = favoriteFolders.first(where: { $0.id == id }), let folderURL = resolvedURL(for: id) else { continue }
             let access = folderURL.startAccessingSecurityScopedResource()
             defer { if access { folderURL.stopAccessingSecurityScopedResource() } }
-            let files = looseFiles(in: folderURL, limit: 60)
-            let preparer = FilePreparer(readContents: readContents, withPicture: true)
+            // Files checked before that belong where they are and kept their name aren't checked again.
+            let files = looseFiles(in: folderURL, limit: 60).filter { !wasReviewed($0) }
+            let preparer = FilePreparer(readContents: readContents)
+            let warm = warmUpModel()
+            defer { withExtendedLifetime(warm) {} }
             for (number, file) in files.enumerated() {
                 if Task.isCancelled { break }
                 folderCheckProgress = "Checking \(folder.name): \(number + 1) of \(files.count)…"
@@ -1167,15 +1127,18 @@ final class AppModel {
                     if let entryID = performMove(file, to: target, kind: .autoMoved, detail: detail, ai: judged.decision, enrich: false,
                                                  runID: runID, runTitle: title) {
                         moved += 1
-                        if judged.renameIsSure, judged.decision.proposedName != nil {
+                        if judged.renamesByItself, judged.decision.proposedName != nil {
                             applyProposedName(entryID, automatic: true)
                             renamed += 1
                         }
                     }
                 case .belongs:
-                    if judged.renameIsSure, let name = judged.decision.proposedName,
-                       renameInPlace(file, to: name, automatic: true, runID: runID, runTitle: title) != nil {
+                    if judged.renamesByItself, let name = judged.decision.proposedName,
+                       let newURL = renameInPlace(file, to: name, automatic: true, runID: runID, runTitle: title) {
                         renamed += 1
+                        markReviewed(newURL)
+                    } else if judged.decision.proposedName == nil {
+                        markReviewed(file)
                     }
                 case .maybe(let target):
                     folderCheckFindings.append(FolderCheckFinding(url: file, folderID: id, suggestedID: target,
@@ -1189,6 +1152,7 @@ final class AppModel {
         }
         folderCheckProgress = nil
         folderCheckTask = nil
+        saveReviewedFiles()
         var parts = ["\(title): moved \(moved), renamed \(renamed)"]
         if !folderCheckFindings.isEmpty { parts.append("\(folderCheckFindings.count) to look at in Folders & Rules") }
         statusMessage = parts.joined(separator: "; ") + "." + (moved + renamed > 0 ? " Undo All is in Activity." : "")
@@ -1205,8 +1169,50 @@ final class AppModel {
         remember(fileName: finding.url.lastPathComponent, destinationID: destinationID)
     }
 
+    /// Leave It: the file stays, and later checks skip it.
     func dismissFinding(_ findingID: String) {
+        guard let finding = folderCheckFindings.first(where: { $0.id == findingID }) else { return }
         folderCheckFindings.removeAll { $0.id == findingID }
+        markReviewed(finding.url)
+    }
+
+    // MARK: Files already looked at
+
+    /// Files Apple Intelligence already named, or that you approved or left as they are. Deep
+    /// Reorganize and Check This Folder skip them until they change.
+    @ObservationIgnored private var reviewedFiles = ReviewedFiles()
+    @ObservationIgnored private var reviewedUnsaved = 0
+    private(set) var reviewedCount = 0
+
+    private func reviewKey(_ url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
+        return ReviewedFiles.key(path: url.standardizedFileURL.path, size: Int64(values.fileSize ?? 0),
+                                 modified: values.contentModificationDate ?? .distantPast)
+    }
+
+    private func wasReviewed(_ url: URL) -> Bool {
+        reviewKey(url).map { reviewedFiles.contains($0) } ?? false
+    }
+
+    private func markReviewed(_ url: URL) {
+        guard let key = reviewKey(url) else { return }
+        reviewedFiles.insert(key)
+        reviewedCount = reviewedFiles.count
+        reviewedUnsaved += 1
+        if reviewedUnsaved >= 20 { saveReviewedFiles() }
+    }
+
+    private func saveReviewedFiles() {
+        reviewedFiles.save()
+        reviewedUnsaved = 0
+    }
+
+    /// Look at every file again, including the ones already named.
+    func forgetReviewedFiles() {
+        reviewedFiles = ReviewedFiles()
+        reviewedCount = 0
+        saveReviewedFiles()
+        statusMessage = "Deep Reorganize and folder checks will look at every file again."
     }
 
     /// Regular files directly in a folder, newest first, skipping hidden files, partial downloads and installers.
@@ -1282,7 +1288,7 @@ final class AppModel {
     /// to leave alone and your Sort-into folders. Sure files are renamed and moved by themselves;
     /// the rest wait on the Reorganize page. Everything can be put back with Undo All.
     func startReorganize() {
-        guard usesLocalModel, !isReorganizing else { return }
+        guard aiReady, !isReorganizing else { return }
         guard !reorganizeFolders.isEmpty else {
             userError = "Add a folder for Deep Reorganize to go through first."
             return
@@ -1299,6 +1305,7 @@ final class AppModel {
         // Sort-into folders are where files go, so the files already in them are left alone.
         let targets = favoriteFolders.filter(\.isSortTarget).compactMap { resolve($0)?.standardizedFileURL.path }
         reorganizeItems = []
+        reorganizeSettled = []
         reorganizeGroups = []
         reorganizeDuplicates = []
         reorganizeDone = 0
@@ -1311,9 +1318,12 @@ final class AppModel {
         reorganizeRun = ReorganizeRun()
         saveReorganizeRun()
         reorganizeTask = Task {
-            let files = await Task.detached(priority: .utility) {
+            let found = await Task.detached(priority: .utility) {
                 Self.reorganizeFiles(sources: sources, skip: skips, targets: targets)
             }.value
+            // Files it already named, or that you approved or left as they are, aren't looked at again.
+            let files = found.filter { !wasReviewed($0) }
+            reorganizeSkipped = found.count - files.count
             reorganizeQueue = reorganizeStopped ? [] : files
             reorganizeTotal = reorganizeQueue.count
             reorganizeSameSize = await Task.detached(priority: .utility) { Self.sharingSize(files) }.value
@@ -1350,7 +1360,9 @@ final class AppModel {
     }
 
     private func runReorganizeQueue() async {
-        let preparer = FilePreparer(readContents: readContents, withPicture: true)
+        let preparer = FilePreparer(readContents: readContents)
+        let warm = warmUpModel()
+        defer { withExtendedLifetime(warm) {} }
         while reorganizeStatus == .running, !reorganizeQueue.isEmpty {
             let file = reorganizeQueue.removeFirst()
             reorganizeCurrent = file.lastPathComponent
@@ -1363,6 +1375,7 @@ final class AppModel {
             reorganizeTimeLeft = ReorganizeTime.remaining(done: reorganizeDone, total: reorganizeTotal, elapsed: reorganizeSeconds)
         }
         saveReorganizeRun()
+        saveReviewedFiles()
         if reorganizeStatus == .paused {
             reorganizeCurrent = nil
             reorganizeTask = nil
@@ -1372,7 +1385,9 @@ final class AppModel {
         reorganizeTask = nil
     }
 
-    /// One file: moved and renamed when sure, renamed when only the name is sure, otherwise left for you.
+    /// One file: moved when sure (and renamed when the name is sure and the old one said nothing),
+    /// renamed when only the name is sure, otherwise left for you. A file whose name is already
+    /// good and that fits no folder is done.
     /// An exact copy of a file already done isn't asked about again; it's listed with the duplicates.
     private func reorganize(_ file: URL, prepared: PreparedFile) async {
         if reorganizeSameSize.contains(file.path) {
@@ -1396,18 +1411,32 @@ final class AppModel {
         if autoMove, decision.isConfident, let id = decision.destinationID, let folder = resolvedURL(for: id),
            let moved = reorganizeMove(current, into: folder) {
             current = moved
-            if judged.renameIsSure, let name = decision.proposedName { _ = reorganizeRename(current, to: name) }
+            if judged.renamesByItself, let name = decision.proposedName, let newURL = reorganizeRename(current, to: name) {
+                current = newURL
+            }
+            markReviewed(current)
             return
         }
         var renamed = false
-        if judged.renameIsSure, let name = decision.proposedName, let newURL = reorganizeRename(current, to: name) {
+        if judged.renamesByItself, let name = decision.proposedName, let newURL = reorganizeRename(current, to: name) {
             current = newURL
             renamed = true
         }
+        let proposed = renamed ? nil : decision.proposedName
+        if proposed == nil, decision.destinationID == nil {
+            // A good name and no folder to suggest: nothing waits for you, but it can still join a suggested new folder.
+            markReviewed(current)
+            reorganizeSettled.append(ReorganizeItem(url: current, summary: decision.summary, reason: decision.reason,
+                                                    groupText: [decision.summary, current.deletingPathExtension().lastPathComponent]
+                                                        .joined(separator: " ")))
+            return
+        }
         let sure = autoMove == false && decision.isConfident
         reorganizeItems.append(ReorganizeItem(url: current, destinationID: decision.destinationID,
-                                              proposedName: renamed ? nil : decision.proposedName, summary: decision.summary,
-                                              reason: decision.reason, moveSelected: sure && decision.destinationID != nil,
+                                              proposedName: proposed, nameIsSure: proposed != nil && judged.nameIsSure,
+                                              summary: decision.summary, reason: decision.reason,
+                                              moveSelected: sure && decision.destinationID != nil,
+                                              renameSelected: proposed != nil && judged.nameIsSure,
                                               groupText: [decision.summary, decision.proposedName ?? ""].joined(separator: " ")))
     }
 
@@ -1444,7 +1473,7 @@ final class AppModel {
     /// After the last file: suggested new folders for files about the same thing, and exact duplicates.
     private func finishReorganize() async {
         reorganizeCurrent = "Looking for duplicates and new folders…"
-        let unplaced = reorganizeItems.filter { $0.destinationID == nil && !$0.groupText.isEmpty }
+        let unplaced = (reorganizeItems + reorganizeSettled).filter { $0.destinationID == nil && !$0.groupText.isEmpty }
         let groups = ContentGrouping.groups(unplaced.map { (id: $0.id, text: $0.groupText) }, minimumSize: max(3, minimumRelatedFileCount),
                                             existingNames: favoriteFolders.map(\.name))
         reorganizeGroups = groups.map { group in
@@ -1477,6 +1506,40 @@ final class AppModel {
         guard let index = reorganizeItems.firstIndex(where: { $0.id == id }) else { return }
         reorganizeItems[index].destinationID = destinationID.isEmpty ? nil : destinationID
         reorganizeItems[index].moveSelected = !destinationID.isEmpty
+    }
+
+    /// Names waiting on the Reorganize page: sure ones (75 or more, from the file) or the ones it isn't sure about.
+    func reorganizeNameCount(sure: Bool) -> Int {
+        reorganizeItems.filter { $0.proposedName != nil && $0.nameIsSure == sure }.count
+    }
+
+    /// Approve All for names: renames every waiting file whose name is sure (or, with `sure` false,
+    /// every one it isn't sure about). Folders still wait. It joins the run, so Undo All covers it.
+    func approveReorganizeNames(sure: Bool) {
+        guard !isReorganizing else { return }
+        var renamed = 0
+        for index in reorganizeItems.indices {
+            let item = reorganizeItems[index]
+            guard let name = item.proposedName, item.nameIsSure == sure, let newURL = reorganizeRename(item.url, to: name) else { continue }
+            reorganizeItems[index].url = newURL
+            reorganizeItems[index].proposedName = nil
+            reorganizeItems[index].renameSelected = false
+            renamed += 1
+            if item.destinationID == nil { markReviewed(newURL) }
+        }
+        // Renamed files with no folder to suggest are done.
+        reorganizeItems.removeAll { $0.proposedName == nil && $0.destinationID == nil }
+        saveReorganizeRun()
+        saveReviewedFiles()
+        statusMessage = "Renamed \(renamed) file\(renamed == 1 ? "" : "s"). Undo All puts the whole run back."
+    }
+
+    /// Leave As Is: the file keeps its name and place, and later runs skip it.
+    func leaveReorganizeItem(_ id: String) {
+        guard let item = reorganizeItems.first(where: { $0.id == id }) else { return }
+        reorganizeItems.removeAll { $0.id == id }
+        markReviewed(item.url)
+        saveReviewedFiles()
     }
 
     func setReorganizeGroup(_ id: String, selected: Bool) {
@@ -1518,9 +1581,11 @@ final class AppModel {
             }
             if item.moveSelected, let id = item.destinationID, let folder = resolvedURL(for: id),
                let newURL = reorganizeMove(current, into: folder) {
+                current = newURL
                 moved += 1
                 remember(fileName: newURL.lastPathComponent, destinationID: id)
             }
+            markReviewed(current)
             done.insert(item.id)
         }
         reorganizeItems.removeAll { done.contains($0.id) }
@@ -1569,7 +1634,8 @@ final class AppModel {
         }
         reorganizeDuplicates.removeAll(where: \.isSelected)
         saveReorganizeRun()
-        if usesLocalModel { for id in newFavorites { learnFolder(id: id) } }
+        saveReviewedFiles()
+        if aiReady { for id in newFavorites { learnFolder(id: id) } }
         statusMessage = "Moved \(moved), renamed \(renamed). Undo All puts the whole run back."
     }
 
@@ -1750,6 +1816,33 @@ final class AppModel {
         refreshFolderGroups()
     }
 
+    /// Approve All for the names Apple Intelligence isn't sure about (50 to 74): renames them all where they are.
+    func approveUnsureCleanupNames() {
+        var receipts: [FileMoveReceipt] = []
+        for index in cleanupRows.indices {
+            let row = cleanupRows[index]
+            guard let name = row.proposedName, !row.nameIsSure else { continue }
+            do {
+                let receipt = try withAccess(to: row.url.deletingLastPathComponent()) { try mover.rename(row.url, to: name) }
+                receipts.append(receipt)
+                handledPaths.insert(receipt.movedURL.path)
+                appMovedPaths.insert(row.url.path)
+                addActivity(ActivityEntry(kind: .renamed, fileName: row.url.lastPathComponent,
+                                          detail: "Renamed to \(receipt.movedURL.lastPathComponent)", receipt: receipt,
+                                          filePath: receipt.movedURL.path))
+                // The row stays, under its new name, so its folder can still be approved.
+                cleanupRows[index].url = receipt.movedURL
+                cleanupRows[index].proposedName = nil
+                cleanupRows[index].renameSelected = false
+            } catch {
+                userError = "Could not rename \(row.url.lastPathComponent): \(error.localizedDescription)"
+            }
+        }
+        guard !receipts.isEmpty else { return }
+        saveLastMove(MoveBatchReceipt(moves: receipts))
+        statusMessage = "Renamed \(receipts.count) file\(receipts.count == 1 ? "" : "s"). Undo Last Move puts the names back."
+    }
+
     /// Applies the checked moves and renames (only the Sure part's moves when `onlySure`).
     func moveSelectedCleanupItems(onlySure: Bool = false) {
         var movedCount = 0
@@ -1758,9 +1851,9 @@ final class AppModel {
         var createdFolders: [URL] = []
         var learned: [(String, String)] = []
 
-        for row in cleanupRows where (row.isSelected || row.renameSelected) && (!onlySure || row.bucket == .sure || row.renameIsSure) {
+        for row in cleanupRows where (row.isSelected || row.renameSelected) && (!onlySure || row.bucket == .sure || row.nameIsSure) {
             var source = row.url
-            if row.renameSelected, let name = row.proposedName, !onlySure || row.bucket == .sure || row.renameIsSure {
+            if row.renameSelected, let name = row.proposedName, !onlySure || row.bucket == .sure || row.nameIsSure {
                 do {
                     let receipt = try withAccess(to: source.deletingLastPathComponent()) { try mover.rename(source, to: name) }
                     receipts.append(receipt)
@@ -1937,9 +2030,9 @@ final class AppModel {
     /// turned them on, specific new-folder groups. It stops as soon as a newer review replaces it.
     private func reviewCleanupWithAI(run: Int) async {
         guard aiReady, let folder = cleanupFolder else { return }
-        // Files without a folder first. Bonsai also looks at the rest, for better names.
+        // Files without a folder first, then the rest, for better names.
         let unplaced = cleanupRows.filter { !$0.hasTarget }
-        let placed = usesLocalModel ? cleanupRows.filter(\.hasTarget) : []
+        let placed = cleanupRows.filter(\.hasTarget)
         let candidates = Array((unplaced + placed).prefix(40))
         let label = modelName
         var factsByPath: [String: FileFacts] = [:]
@@ -1959,8 +2052,8 @@ final class AppModel {
                 cleanupRows[index].bucket = decision.isConfident ? .sure : .guess
             }
             cleanupRows[index].proposedName = decision.proposedName
-            cleanupRows[index].renameIsSure = judged.renameIsSure
-            cleanupRows[index].renameSelected = judged.renameIsSure
+            cleanupRows[index].nameIsSure = decision.proposedName != nil && judged.nameIsSure
+            cleanupRows[index].renameSelected = decision.proposedName != nil && judged.nameIsSure
             cleanupRows[index].summary = decision.summary.isEmpty ? nil : decision.summary
         }
         if aiGroupsEnabled {
@@ -2094,8 +2187,8 @@ final class AppModel {
         }
         let existing = Set(favoriteFolders.compactMap { resolve($0)?.standardizedFileURL.path })
         let ranked = SetupSuggestions.rank(folders, existing: existing)
-        // With Bonsai, notes come from learning each folder's files after it's added.
-        let drafts = aiReady && !usesLocalModel
+        // Notes are drafted from the folders' file names; each Sort-into folder is also learned from its files once added.
+        let drafts = aiReady
         setupCandidates = ranked.map { folder in
             SetupCandidate(url: URL(fileURLWithPath: folder.path, isDirectory: true), fileCount: counts[folder.path] ?? folder.fileCount,
                            note: "", isDrafting: drafts)
@@ -2149,7 +2242,7 @@ final class AppModel {
             added += 1
         }
         persist(favoriteFolders, key: Keys.folders)
-        if usesLocalModel { for id in toLearn { learnFolder(id: id) } }
+        if aiReady { for id in toLearn { learnFolder(id: id) } }
         setupCandidates = []
         isSetupOpen = false
         statusMessage = added == 0 ? nil : "Added \(added) favorite folder\(added == 1 ? "" : "s")."

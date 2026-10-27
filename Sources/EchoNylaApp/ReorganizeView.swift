@@ -2,8 +2,8 @@ import AppKit
 import EchoNylaCore
 import SwiftUI
 
-/// Deep Reorganize: Bonsai goes through whole folders, names files and moves the sure ones into your
-/// Sort-into folders. Everything else waits here, with suggested new folders and exact duplicates.
+/// Deep Reorganize: Apple Intelligence goes through whole folders, names files and moves the sure ones
+/// into your Sort-into folders. Everything else waits here, with suggested new folders and exact duplicates.
 struct ReorganizeTab: View {
     @Environment(AppModel.self) private var model
     @State private var confirmStart = false
@@ -11,9 +11,9 @@ struct ReorganizeTab: View {
     @State private var confirmUndo = false
 
     var body: some View {
-        Page(title: "Deep Reorganize", subtitle: "Bonsai goes through whole folders. Files it's sure about get a clear name and move into your Sort-into folders by themselves; the rest wait here. Undo All puts everything back.") {
-            if !model.usesLocalModel {
-                Card { Caption("Deep Reorganize needs Bonsai. Download it in Settings → On-device model.") }
+        Page(title: "Deep Reorganize", subtitle: "Apple Intelligence goes through whole folders. Files it's sure about get a clear name and move into your Sort-into folders by themselves; the rest wait here. Undo All puts everything back.") {
+            if let reason = model.aiUnavailableReason {
+                Card { Caption("Deep Reorganize needs Apple Intelligence. \(reason)") }
             }
             ReorganizeFoldersCard(skip: false)
             ReorganizeFoldersCard(skip: true)
@@ -30,7 +30,7 @@ struct ReorganizeTab: View {
     private var targetsNote: some View {
         let targets = model.checkableFolders.map(\.name)
         if targets.isEmpty {
-            Caption("No Sort-into folders yet, so Bonsai can only rename files and suggest new folders. Set some up in Folders & Rules.")
+            Caption("No Sort-into folders yet, so it can only rename files and suggest new folders. Set some up in Folders & Rules.")
         } else {
             Caption("Files go into your Sort-into folders: \(targets.joined(separator: ", ")). Those folders' own files are left alone.")
         }
@@ -54,7 +54,7 @@ struct ReorganizeTab: View {
                 case .idle, .finished:
                     Button("Start Deep Reorganize", systemImage: "wand.and.stars") { confirmStart = true }
                         .buttonStyle(.brass)
-                        .disabled(!model.usesLocalModel || model.reorganizeFolders.isEmpty)
+                        .disabled(!model.aiReady || model.reorganizeFolders.isEmpty)
                         .confirmationDialog("Start Deep Reorganize?", isPresented: $confirmStart, titleVisibility: .visible) {
                             Button("Start") { model.startReorganize() }
                             Button("Cancel", role: .cancel) {}
@@ -63,6 +63,15 @@ struct ReorganizeTab: View {
                         }
                 }
                 Spacer()
+            }
+            if model.reviewedCount > 0 {
+                HStack(spacing: 8) {
+                    Caption(skippedText)
+                    Button("Look at All Files Again") { model.forgetReviewedFiles() }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .disabled(model.isReorganizing)
+                }
             }
             if model.isReorganizing {
                 if model.reorganizeTotal > 0 {
@@ -75,12 +84,18 @@ struct ReorganizeTab: View {
 
     private var startMessage: String {
         var text = model.autoMove
-            ? "Sure files are renamed and moved by themselves; everything else waits on this page. It takes about 9 seconds a file and you can pause it. Undo All puts everything back."
-            : "Moving by itself is off in Settings, so files are only renamed when Bonsai is sure; every move waits on this page. Undo All puts everything back."
+            ? "Sure files are renamed and moved by themselves; everything else waits on this page. You can pause it. Undo All puts everything back."
+            : "Moving by itself is off in Settings, so files are only renamed when Apple Intelligence is sure; every move waits on this page. Undo All puts everything back."
         if model.reorganizeRun?.hasChanges == true {
             text += " Starting again replaces the last run's Undo All."
         }
         return text
+    }
+
+    private var skippedText: String {
+        let skipped = model.reorganizeSkipped
+        let base = "Files it already named, or that you approved or left as they are, are skipped until they change."
+        return skipped > 0 ? base + " Skipped \(skipped) last run." : base
     }
 
     private var progressText: String {
@@ -166,10 +181,12 @@ struct ReorganizeFoldersCard: View {
     }
 }
 
-/// What's waiting for you after a run: files Bonsai wasn't sure about, new folders and duplicates.
+/// What's waiting for you after a run: files it wasn't sure about, new folders and duplicates.
 struct ReorganizeResults: View {
     @Environment(AppModel.self) private var model
     @Binding var confirmApply: Bool
+    @State private var confirmSureNames = false
+    @State private var confirmUnsureNames = false
     /// The list stays quick with hundreds of files; the rest show after these are handled.
     private let shown = 150
 
@@ -178,11 +195,58 @@ struct ReorganizeResults: View {
         let others = model.reorganizeItems.filter { $0.destinationID == nil }
         if !model.reorganizeItems.isEmpty || !model.reorganizeGroups.isEmpty || !model.reorganizeDuplicates.isEmpty {
             VStack(alignment: .leading, spacing: 16) {
+                namesBar
                 if !ideas.isEmpty { itemSection("Might belong in a folder · \(ideas.count)", items: ideas) }
                 if !model.reorganizeGroups.isEmpty { groupsSection }
                 if !model.reorganizeDuplicates.isEmpty { duplicatesSection }
                 if !others.isEmpty { itemSection("No folder fits · \(others.count)", items: others) }
                 applyBar
+            }
+        }
+    }
+
+    /// Approve All for names: the sure ones, and the ones it isn't sure about once you've looked them over.
+    @ViewBuilder
+    private var namesBar: some View {
+        let sure = model.reorganizeNameCount(sure: true)
+        let unsure = model.reorganizeNameCount(sure: false)
+        if sure + unsure > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel("New names")
+                if sure > 0 {
+                    nameRow("\(sure) sure name\(sure == 1 ? "" : "s"), checked below.", button: "Approve All \(sure) Sure Name\(sure == 1 ? "" : "s")",
+                            prominent: true, confirm: $confirmSureNames, count: sure) { model.approveReorganizeNames(sure: true) }
+                }
+                if unsure > 0 {
+                    nameRow("\(unsure) name\(unsure == 1 ? "" : "s") it isn't sure about, marked “not sure” below. Look them over first.",
+                            button: "Approve All \(unsure) Not-Sure Name\(unsure == 1 ? "" : "s")", prominent: false,
+                            confirm: $confirmUnsureNames, count: unsure) { model.approveReorganizeNames(sure: false) }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardSurface()
+        }
+    }
+
+    private func nameRow(_ text: String, button: String, prominent: Bool, confirm: Binding<Bool>, count: Int,
+                         action: @escaping () -> Void) -> some View {
+        HStack {
+            Caption(text)
+            Spacer()
+            Group {
+                if prominent {
+                    Button(button) { confirm.wrappedValue = true }.buttonStyle(.brass)
+                } else {
+                    Button(button) { confirm.wrappedValue = true }.buttonStyle(.pill)
+                }
+            }
+            .disabled(model.isReorganizing)
+            .confirmationDialog("Rename \(count) file\(count == 1 ? "" : "s")?", isPresented: confirm, titleVisibility: .visible) {
+                Button("Rename All", action: action)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Each file gets the name shown under it and stays where it is; folders still wait for you. Undo All puts the whole run back.")
             }
         }
     }
@@ -210,7 +274,7 @@ struct ReorganizeResults: View {
     private var groupsSection: some View {
         GroupBox("Suggested new folders") {
             VStack(alignment: .leading, spacing: 10) {
-                Caption("Files Bonsai couldn't place that are about the same thing. A folder is made next to most of its files only when you check it.")
+                Caption("Files it couldn't place that are about the same thing. A folder is made next to most of its files only when you check it.")
                 ForEach(model.reorganizeGroups) { group in
                     HStack(alignment: .top, spacing: 8) {
                         Toggle("Make this folder", isOn: Binding(
@@ -314,7 +378,7 @@ struct ReorganizeItemRow: View {
                 if !item.summary.isEmpty { Caption(item.summary) }
                 Caption(item.reason)
                 if let proposed = item.proposedName {
-                    Toggle("Rename to “\(proposed)”", isOn: Binding(
+                    Toggle("Rename to “\(proposed)”" + (item.nameIsSure ? "" : " (not sure)"), isOn: Binding(
                         get: { item.renameSelected },
                         set: { model.setReorganizeRename(item.id, $0) }
                     ))
@@ -333,9 +397,14 @@ struct ReorganizeItemRow: View {
                 }
                 .labelsHidden()
                 .frame(width: 170)
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
+                HStack(spacing: 10) {
+                    Button("Leave As Is") { model.leaveReorganizeItem(item.id) }
+                        .help("Keep its name and place; later runs skip it")
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(model.isReorganizing)
             }
         }
         .padding(.horizontal, 14)

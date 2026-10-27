@@ -1,45 +1,7 @@
 import XCTest
 @testable import EchoNylaCore
 
-final class LocalModelTests: XCTestCase {
-    private let sha = String(repeating: "ab", count: 32)
-
-    // MARK: The model files
-
-    func testTheOfficialQ2FileAndItsPictureReaderAreChosen() throws {
-        let listing = """
-        [{"type":"file","path":"README.md","size":900},
-         {"type":"file","path":"Ternary-Bonsai-2-9B-PQ2_0.gguf","size":2400000000,"lfs":{"oid":"\(sha)","size":2400000000}},
-         {"type":"file","path":"Ternary-Bonsai-2-9B-PTQ1_0.gguf","size":2000000000,"lfs":{"oid":"\(sha)","size":2000000000}},
-         {"type":"file","path":"Ternary-Bonsai-2-9B-Q2_0.gguf","size":2560000000,"lfs":{"oid":"\(sha)","size":2560000000}},
-         {"type":"file","path":"Ternary-Bonsai-2-9B-mmproj-F16.gguf","size":1100000000,"lfs":{"oid":"\(sha)","size":1100000000}},
-         {"type":"file","path":"Ternary-Bonsai-2-9B-mmproj-Q8_0.gguf","size":620000000,"lfs":{"oid":"\(sha)","size":620000000}}]
-        """
-        let files = ModelFiles.parseListing(Data(listing.utf8))
-        XCTAssertEqual(files.count, 5)   // README has no checksum, so it's left out
-        let choice = try XCTUnwrap(ModelFiles.choose(files))
-        XCTAssertEqual(choice.model.path, "Ternary-Bonsai-2-9B-Q2_0.gguf")
-        XCTAssertEqual(choice.model.size, 2_560_000_000)
-        XCTAssertEqual(choice.projector.path, "Ternary-Bonsai-2-9B-mmproj-Q8_0.gguf")
-        XCTAssertEqual(choice.model.sha256, sha)
-    }
-
-    func testTheGroup64FileWinsOnOlderRepositories() throws {
-        let files = [HubFile(path: "M-Q2_0.gguf", size: 1, sha256: sha), HubFile(path: "M-Q2_0_g64.gguf", size: 1, sha256: sha),
-                     HubFile(path: "M-mmproj-Q8_0.gguf", size: 1, sha256: sha)]
-        XCTAssertEqual(ModelFiles.choose(files)?.model.path, "M-Q2_0_g64.gguf")
-        XCTAssertNil(ModelFiles.choose([HubFile(path: "M-PQ2_0.gguf", size: 1, sha256: sha),
-                                        HubFile(path: "M-mmproj-Q8_0.gguf", size: 1, sha256: sha)]))
-        XCTAssertNil(ModelFiles.choose([HubFile(path: "M-Q2_0.gguf", size: 1, sha256: sha)]))
-    }
-
-    func testDownloadAddresses() {
-        let spec = LocalModelSpec.bonsai9B
-        XCTAssertEqual(spec.listingURL.absoluteString, "https://huggingface.co/api/models/prism-ml/Ternary-Bonsai-2-9B-gguf/tree/main")
-        XCTAssertEqual(spec.downloadURL(for: HubFile(path: "Ternary-Bonsai-2-9B-Q2_0.gguf", size: 1, sha256: sha)).absoluteString,
-                       "https://huggingface.co/prism-ml/Ternary-Bonsai-2-9B-gguf/resolve/main/Ternary-Bonsai-2-9B-Q2_0.gguf")
-    }
-
+final class FileJudgingTests: XCTestCase {
     // MARK: The question and the answer
 
     private let folders = [
@@ -48,24 +10,33 @@ final class LocalModelTests: XCTestCase {
         Destination(id: "loose", name: "Loose", purpose: nil)
     ]
 
-    func testTheFoldersComeFirstAndTheFileAfter() {
+    func testTheFoldersAreInTheInstructionsAndTheFileInTheQuestion() {
         let facts = FileFacts(fileName: "Screenshot 2026-10-27 at 9.41.02 AM.png", isScreenshot: true, text: "Verbyn Settings Signature")
-        // The folders sit in the instructions, which are the same for every file.
-        let shared = LocalPrompt.instructions(destinations: folders, locked: [])
-        XCTAssertTrue(shared.hasPrefix(LocalPrompt.instructions))
-        XCTAssertTrue(shared.contains("- purevopic: Pictures and screen recordings for the Purevo app's website"))
-        XCTAssertTrue(shared.contains("- Bills: Utility bills and invoices for the apartment"))
-        XCTAssertFalse(shared.contains("- Loose"))
-        XCTAssertTrue(LocalPrompt.instructions(destinations: [], locked: []).hasSuffix("answer none for the folder."))
+        // The folders sit in the instructions, which are the same for every file of a batch.
+        let instructions = ModelPrompt.instructions(destinations: folders, locked: [])
+        XCTAssertTrue(instructions.hasPrefix(ModelPrompt.rules))
+        XCTAssertTrue(instructions.contains("- purevopic: Pictures and screen recordings for the Purevo app's website"))
+        XCTAssertTrue(instructions.contains("- Bills: Utility bills and invoices for the apartment"))
+        XCTAssertFalse(instructions.contains("- Loose"))
+        XCTAssertTrue(ModelPrompt.instructions(destinations: [], locked: []).hasSuffix("answer none for the folder."))
         // The question is only about the file.
-        let question = LocalPrompt.question(facts: facts, currentFolderName: "Bills", imageMarker: "<__media__>")
-        XCTAssertTrue(question.hasPrefix("Picture of the file:\n<__media__>\n"))
+        let question = ModelPrompt.question(facts: facts, currentFolderName: "Bills", hasPicture: true)
+        XCTAssertTrue(question.hasPrefix("A picture of the file comes after these facts.\n"))
         XCTAssertFalse(question.contains("purevopic"))
         XCTAssertTrue(question.contains("The file is now in the folder \"Bills\"."))
-        let chat = LocalPrompt.conversation(question: "Q")
-        XCTAssertTrue(chat.hasPrefix("<|im_start|>system\n"))
-        XCTAssertEqual(chat, LocalPrompt.system(LocalPrompt.instructions) + LocalPrompt.turn("Q"))
-        XCTAssertTrue(chat.hasSuffix("<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"))
+        XCTAssertFalse(ModelPrompt.question(facts: facts, hasPicture: false).contains("picture"))
+    }
+
+    func testSpeechNamesAndLanguageReachTheQuestion() {
+        let facts = FileFacts(fileName: "New Recording 12.m4a", speech: "Hi Dana, it's about the Denver lease, call me back.",
+                              names: ["Dana", "Denver"], language: "Spanish")
+        let text = facts.promptText()
+        XCTAssertTrue(text.contains("Names in it: Dana, Denver"))
+        XCTAssertTrue(text.contains("Language: Spanish"))
+        XCTAssertTrue(text.contains("Spoken in the first minute: Hi Dana, it's about the Denver lease, call me back."))
+        XCTAssertTrue(facts.hasContentEvidence)
+        // A name built from what was said is grounded.
+        XCTAssertTrue(RenameGrounding.isGrounded(title: "Denver lease voicemail", evidence: Evidence(facts: facts, description: "")))
     }
 
     func testDocumentsWithEnoughTextGoWithoutAPicture() {
@@ -79,22 +50,10 @@ final class LocalModelTests: XCTestCase {
         XCTAssertFalse(PictureNeed.wanted(FileFacts(fileName: "notes.txt", text: "")))
     }
 
-    func testTheGrammarOffersOnlyNoneAndTheFolders() {
-        let grammar = LocalPrompt.grammar(folderNames: ["purevopic", "Sam's \"Q\" folder"])
-        XCTAssertTrue(grammar.contains(#"folder ::= "\"none\"" | "\"purevopic\"" | "\"Sam's \\\"Q\\\" folder\"""#))
-        XCTAssertTrue(grammar.contains(#"score ::= "100" | [1-9] [0-9] | [0-9]"#))
-        XCTAssertTrue(grammar.hasPrefix("root ::= \"{\""))
-        XCTAssertFalse(grammar.contains("note_words"))
-        XCTAssertTrue(grammar.contains(#"text ::= "\"" char{0,160} "\"""#))
-    }
-
-    func testAnswersAreReadAndScoresKeptInRange() throws {
-        let text = #"ok {"what_it_is": "An invoice", "name": "Acme invoice", "name_confidence": 140, "folder": "Bills", "note_words": "invoices", "folder_confidence": 90} done"#
-        let answer = try XCTUnwrap(LocalAnswer.parse(text))
-        XCTAssertEqual(answer.name, "Acme invoice")
+    func testScoresAreKeptInRange() {
+        let answer = ModelAnswer(whatItIs: "An invoice", name: "Acme invoice", nameConfidence: 140, folder: "Bills", folderConfidence: -5)
         XCTAssertEqual(answer.nameConfidence, 100)
-        XCTAssertEqual(answer.folderConfidence, 90)
-        XCTAssertNil(LocalAnswer.parse("no json here"))
+        XCTAssertEqual(answer.folderConfidence, 0)
     }
 
     // MARK: The safety net
@@ -133,12 +92,8 @@ final class LocalModelTests: XCTestCase {
         let samples = ["A screenshot of Purevo's waveform view", "Purevo settings window with Clean audio", "Verbyn window"]
         XCTAssertEqual(FolderProfile.words(samples: samples), ["purevo"])
         XCTAssertEqual(Set(FolderProfile.words(samples: ["Acme plumbing invoice"])), ["acme", "plumbin", "invoice"])
-        XCTAssertEqual(FolderProfile.parseNote(#"{"note": "Screenshots of the Purevo app."}"#), "Screenshots of the Purevo app")
-        XCTAssertNil(FolderProfile.parseNote("nothing"))
         let prompt = FolderProfile.notePrompt(folderName: "purevopic", descriptions: ["Purevo's waveform"])
-        XCTAssertTrue(prompt.contains("in the folder \"purevopic\":\n- Purevo's waveform\n"))
-        XCTAssertTrue(prompt.hasPrefix("<|im_start|>system\nYou describe folders"))
-        XCTAssertTrue(FolderProfile.noteGrammar.contains(#"root ::= "{" ws "\"note\":" ws note ws "}""#))
+        XCTAssertTrue(prompt.hasPrefix("These files are in the folder \"purevopic\":\n- Purevo's waveform\n"))
     }
 
     func testOnlySortIntoFoldersAreChoosable() throws {
@@ -156,31 +111,43 @@ final class LocalModelTests: XCTestCase {
     func testTheCheckedDecision() {
         let facts = FileFacts(fileName: "Screenshot 2026-10-27 at 9.41.02 AM.png", isScreenshot: true,
                               text: "Purevo Clean audio Before After", imageLabels: ["screenshot"])
-        let answer = LocalAnswer(whatItIs: "A screenshot of the Purevo app's Clean audio screen.", name: "Purevo Clean audio screen",
+        let answer = ModelAnswer(whatItIs: "A screenshot of the Purevo app's Clean audio screen.", name: "Purevo Clean audio screen",
                                  nameConfidence: 88, folder: "purevopic", folderConfidence: 91)
-        let result = LocalDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
+        let result = ModelDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
         XCTAssertEqual(result.decision.destinationID, "pics")
         XCTAssertTrue(result.decision.isConfident)
         XCTAssertTrue(result.matchesFolder)
         XCTAssertEqual(result.decision.proposedName, "2026-10-27 Purevo Clean audio screen.png")
-        XCTAssertTrue(result.renameIsSure)
+        XCTAssertTrue(result.nameIsSure)
+        XCTAssertTrue(result.renamesByItself)
         XCTAssertEqual(result.decision.reason, "Matches Purevo in purevopic.")
+
+        // 75 is sure for a name; an old name that already says something is only renamed when you approve.
+        var named = answer
+        named.nameConfidence = 75
+        let kept = ModelDecisionCheck.check(named, facts: FileFacts(fileName: "Purevo audio notes.png", text: facts.text), destinations: folders, locked: [])
+        XCTAssertTrue(kept.nameIsSure)
+        XCTAssertFalse(kept.renamesByItself)
 
         // Below the bar: still a suggestion, not a move.
         var lower = answer
         lower.folderConfidence = 70
         lower.nameConfidence = 60
-        let unsure = LocalDecisionCheck.check(lower, facts: facts, destinations: folders, locked: [])
+        let unsure = ModelDecisionCheck.check(lower, facts: facts, destinations: folders, locked: [])
         XCTAssertEqual(unsure.decision.destinationID, "pics")
         XCTAssertFalse(unsure.decision.isConfident)
-        XCTAssertFalse(unsure.renameIsSure)
+        XCTAssertFalse(unsure.nameIsSure)
+        XCTAssertFalse(unsure.renamesByItself)
         XCTAssertEqual(unsure.decision.proposedName, "2026-10-27 Purevo Clean audio screen.png")
+        // Under 50 the name isn't offered at all.
+        lower.nameConfidence = 49
+        XCTAssertNil(ModelDecisionCheck.check(lower, facts: facts, destinations: folders, locked: []).decision.proposedName)
 
         // A folder that shares nothing with the file is dropped entirely, however sure the model is.
         var wrong = answer
         wrong.folder = "Bills"
         wrong.folderConfidence = 99
-        let dropped = LocalDecisionCheck.check(wrong, facts: facts, destinations: folders, locked: [])
+        let dropped = ModelDecisionCheck.check(wrong, facts: facts, destinations: folders, locked: [])
         XCTAssertNil(dropped.decision.destinationID)
         XCTAssertEqual(dropped.namedFolderID, "bills")
         XCTAssertFalse(dropped.decision.isConfident)
@@ -199,7 +166,7 @@ final class LocalModelTests: XCTestCase {
         XCTAssertTrue(NameQuality.isUnhelpful("allsame.zip"))
         XCTAssertFalse(NameQuality.isUnhelpful("2 week notice.pages"))
         XCTAssertFalse(NameQuality.isUnhelpful("Acme Plumbing invoice.pdf"))
-        // Names with no word at all can't teach Bonsai where things go.
+        // Names with no word at all can't teach the model where things go.
         XCTAssertTrue(NameQuality.saysNothing("Screenshot 2026-10-25 at 12.33.39 AM (2).png"))
         XCTAssertTrue(NameQuality.saysNothing("IMG_4821.HEIC"))
         XCTAssertTrue(NameQuality.saysNothing("DSC01234.JPG"))
@@ -246,19 +213,19 @@ final class LocalModelTests: XCTestCase {
         // The checked decision uses the tidied name.
         let facts = FileFacts(fileName: "Screenshot 2026-10-25 at 12.33.33 AM (2).png", isScreenshot: true,
                               text: "Purevo Congrats (Purevo).wav Clean audio")
-        let answer = LocalAnswer(whatItIs: "Purevo's window with a file loaded.", name: "Purevo interface - Congrats (Purevo).wav",
+        let answer = ModelAnswer(whatItIs: "Purevo's window with a file loaded.", name: "Purevo interface - Congrats (Purevo).wav",
                                  nameConfidence: 90, folder: "none", folderConfidence: 0)
-        let result = LocalDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
+        let result = ModelDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
         XCTAssertEqual(result.decision.proposedName, "2026-10-25 Purevo interface - Congrats (Purevo).png")
-        XCTAssertTrue(result.renameIsSure)
+        XCTAssertTrue(result.renamesByItself)
     }
 
     func testTheQuestionCarriesPastFilingExamples() {
         let facts = FileFacts(fileName: "a.png")
-        let question = LocalPrompt.question(facts: facts, examples: ["“Purevo before-after.png” → purevopic"], imageMarker: nil)
+        let question = ModelPrompt.question(facts: facts, examples: ["“Purevo before-after.png” → purevopic"], hasPicture: false)
         XCTAssertTrue(question.contains("How this person filed similar files before:\n- “Purevo before-after.png” → purevopic"))
-        XCTAssertFalse(LocalPrompt.question(facts: facts, imageMarker: nil).contains("filed similar"))
-        XCTAssertEqual(ConfidenceBar.standard.folder, 80)
+        XCTAssertFalse(ModelPrompt.question(facts: facts, hasPicture: false).contains("filed similar"))
+        XCTAssertEqual(ConfidenceBar.standard, ConfidenceBar(folder: 80, name: 75, nameShown: 50))
     }
 
     func testPicturesKeepTheirDateFirst() {
@@ -279,9 +246,10 @@ final class LocalModelTests: XCTestCase {
     // MARK: Check This Folder and Undo All
 
     func testFolderCheckVerdicts() {
-        func decision(_ named: String?, confident: Bool) -> LocalDecision {
-            LocalDecision(decision: FileDecision(destinationID: named, isConfident: confident, reason: "", proposedName: nil, summary: ""),
-                          namedFolderID: named, folderConfidence: confident ? 95 : 50, matchesFolder: named != nil, renameIsSure: false)
+        func decision(_ named: String?, confident: Bool) -> ModelDecision {
+            ModelDecision(decision: FileDecision(destinationID: named, isConfident: confident, reason: "", proposedName: nil, summary: ""),
+                          namedFolderID: named, folderConfidence: confident ? 95 : 50, matchesFolder: named != nil, nameIsSure: false,
+                          renamesByItself: false)
         }
         XCTAssertEqual(FolderCheck.verdict(currentFolderID: "a", decision: decision("a", confident: true)), .belongs)
         XCTAssertEqual(FolderCheck.verdict(currentFolderID: "a", decision: decision("b", confident: true)), .move(to: "b"))

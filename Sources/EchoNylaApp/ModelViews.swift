@@ -2,71 +2,32 @@ import AppKit
 import EchoNylaCore
 import SwiftUI
 
-/// Settings → On-device model: Bonsai or Apple Intelligence, and the download.
+/// Settings → Apple Intelligence: on or off, reading inside files, and how sure it must be.
 struct ModelSettings: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         @Bindable var model = model
-        GroupBox("On-device model") {
+        GroupBox("Apple Intelligence") {
             VStack(alignment: .leading, spacing: 8) {
-                SettingToggle("Use AI on this Mac", isOn: $model.aiEnabled)
-                SettingToggle("Look inside files (text, and pictures of screenshots, photos, PDFs and documents)", isOn: $model.readContents)
+                SettingToggle("Use Apple Intelligence on this Mac", isOn: $model.aiEnabled)
+                SettingToggle("Look inside files (text, the first minute of recordings and videos, and pictures of screenshots, photos, PDFs and documents)",
+                              isOn: $model.readContents)
                     .disabled(!model.aiEnabled)
-                Picker("Model", selection: $model.modelChoice) {
-                    Text("Ternary Bonsai 2 9B (sees pictures, renames and sorts by itself)").tag(ModelChoice.bonsai)
-                    Text("Apple Intelligence").tag(ModelChoice.apple)
+                IntelligenceStatus()
+                Caption(barText)
+                if !OnDeviceModel.seesPictures {
+                    Caption("Looking at pictures of files needs macOS 27. Until then it reads their text and what Apple's image recognition sees.")
                 }
-                .pickerStyle(.radioGroup)
-                .disabled(!model.aiEnabled)
-                if model.modelChoice == .bonsai {
-                    bonsaiStatus
-                } else {
-                    IntelligenceStatus()
-                }
-                Caption("Both run only on this Mac, never in the cloud. Long numbers such as account and card numbers are hidden from them. Everything still works with AI off.")
+                Caption("It runs only on this Mac, never in the cloud. Long numbers such as account and card numbers are hidden from it. Everything still works with it off.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
         }
     }
 
-    @ViewBuilder
-    private var bonsaiStatus: some View {
-        switch model.localModelState {
-        case .notInstalled:
-            Caption("Bonsai is a one-time download of about 3.2 GB from Hugging Face (PrismML's Ternary Bonsai 2 9B). It runs inside EchoNyla, uses about 3.5 GB of memory only while it's sorting, and lets go of it after a minute. Until it's downloaded, Apple Intelligence is used.")
-            Button("Download Bonsai (3.2 GB)", systemImage: "arrow.down.circle") { model.downloadLocalModel() }
-                .buttonStyle(.brass)
-        case .downloading(let fraction):
-            HStack(spacing: 10) {
-                ProgressView(value: fraction)
-                    .frame(maxWidth: 260)
-                Caption("Downloading \(Int(fraction * 100))%…")
-                Button("Cancel") { model.cancelLocalModelDownload() }
-                    .buttonStyle(.pill)
-            }
-        case .failed(let reason):
-            Label(reason, systemImage: "exclamationmark.triangle")
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Try Again", systemImage: "arrow.clockwise") { model.downloadLocalModel() }
-                .buttonStyle(.pill)
-        case .installed:
-            Label("Bonsai is ready (\(ByteCountFormatter.string(fromByteCount: model.localModelBytesOnDisk, countStyle: .file)) on disk).",
-                  systemImage: "checkmark.seal")
-                .font(.callout)
-            Caption(barText)
-            HStack {
-                Spacer()
-                Button("Remove Bonsai", role: .destructive) { model.removeLocalModel() }
-                    .buttonStyle(.borderless)
-            }
-        }
-    }
-
     private var barText: String {
-        "It moves a file by itself when it's at least \(model.confidenceBar.folder)% sure and what's in the file matches that Sort-into folder better than any other. It renames by itself when it's at least \(model.confidenceBar.name)% sure, the name comes from what's in the file, and the old name said nothing (like \"Screenshot 2026-10-27 at 9.41.02\" or \"IMG_4821\"). Everything else waits for you."
+        "It moves a file by itself when it's at least \(model.confidenceBar.folder)% sure and what's in the file matches that Sort-into folder better than any other. A new name is sure at \(model.confidenceBar.name)% when it comes from what's in the file: it's checked for you and applied by itself when the old name said nothing (like \"Screenshot 2026-10-27 at 9.41.02\" or \"IMG_4821\"). Names from \(model.confidenceBar.nameShown)% are listed as not sure. Everything else waits for you."
     }
 }
 
@@ -77,10 +38,7 @@ struct FolderCheckCard: View {
     var body: some View {
         GroupBox("Check folders") {
             VStack(alignment: .leading, spacing: 8) {
-                if !model.usesLocalModel {
-                    Caption("Download Bonsai in Settings → On-device model to check your folders.")
-                }
-                Caption("Bonsai looks at every file in a Sort-into folder. Files that clearly belong in another folder move there by themselves, and files with names that say nothing get a proper name. Anything it isn't sure about is listed here. Undo All is in Activity.")
+                Caption("Apple Intelligence looks at every file in a Sort-into folder. Files that clearly belong in another folder move there by themselves, and files with names that say nothing get a proper name. Anything it isn't sure about is listed here. Files it checked before and left alone aren't checked again until they change. Undo All is in Activity.")
                 if let progress = model.folderCheckProgress {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -91,7 +49,7 @@ struct FolderCheckCard: View {
                 } else {
                     Button("Check All Folders", systemImage: "wand.and.stars") { model.checkAllFolders() }
                         .buttonStyle(.brass)
-                        .disabled(!model.usesLocalModel || !model.aiReady || model.checkableFolders.isEmpty)
+                        .disabled(!model.aiReady || model.checkableFolders.isEmpty)
                 }
                 if !model.folderCheckFindings.isEmpty {
                     SectionLabel("Not sure about these")
