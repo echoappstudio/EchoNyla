@@ -21,6 +21,8 @@ struct ReorganizeItem: Identifiable {
     /// A Sort-into folder it might belong in, or nil.
     var destinationID: String?
     var proposedName: String?
+    /// The name is sure (75 or more, built from what's in the file): it starts checked.
+    var nameIsSure = false
     var summary: String
     var reason: String
     var moveSelected = false

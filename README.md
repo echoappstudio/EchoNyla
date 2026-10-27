@@ -20,11 +20,11 @@
 - **Drop a file on a folder.** The menu-bar panel shows your favorite folders as tiles: drop a file on one and it goes straight there, with Undo. Drop it below the tiles, or on the menu-bar icon, and EchoNyla sorts it for you. The panel stays open until you close it, so you can pick files up in Finder without it disappearing.
 - **Set up in a minute.** EchoNyla suggests favorite folders from the ones you already use in Documents and on the Desktop, each with a note saying what goes there, drafted by Apple Intelligence. Nothing is added until you tick it.
 - **Files it's sure about are filed right away**, with Undo: your rules, macOS screenshots, patterns learned from your own moves, and Apple Intelligence when it's certain and backed by what's inside the file. Everything else waits for one click.
-- **Apple Intelligence understands your files** on this Mac: text in PDFs and documents, text and objects in screenshots and photos, and the website a download came from.
+- **Apple Intelligence understands your files** on this Mac: text in PDFs and documents, text and objects in screenshots and photos, the people, places and companies they name, the first minute of voice memos and videos, and the website a download came from. On macOS 27 it also looks at a picture of screenshots, photos, scans and documents.
 - **You decide which folders it may use.** Give a favorite folder a short note saying what goes there (“Chase statement CSV exports only”), and Apple Intelligence suggests it only for files that plainly match. Folders without a note stay yours: drag and drop, rules and your own moves only.
 - **Watches Downloads, Desktop and folders you choose.** New files are handled once they've finished downloading, with a notification to Undo or Move. Files that were already there are never touched. When you move a new file into a favorite folder yourself in Finder, EchoNyla learns from that too.
-- **Clearer names.** `document (3).pdf` can become `2026-10 Lease renewal.pdf`; renames always wait for your approval.
-- **A smarter on-device model (optional).** Download Ternary Bonsai 2 9B (about 3.2 GB) in Settings and it runs inside EchoNyla on the built-in llama.cpp engine. It looks at screenshots, photos and documents, gives files with useless names a proper name when it's sure, sorts files only when it can quote the folder's note, and can check a folder for files that don't belong. Every batch has Undo All.
+- **Clearer names.** `document (3).pdf` can become `2026-10 Lease renewal.pdf`. A name it's sure about (75% or more, built from what's in the file) is checked for you, and applied by itself when the old name said nothing, like `IMG_4821`. Names it's less sure about are listed with their own Approve All.
+- **Deep Reorganize and folder checks.** Apple Intelligence goes through whole folders, names files and moves the sure ones into your folders; it checks a folder for files that don't belong, and learns what goes in a folder from the files already there. Files it already named are skipped next time. Every batch has Undo All.
 - **Clean up any folder.** Pick Downloads, Desktop, Documents or any other folder from one menu; the main button cleans it and EchoNyla remembers it. Loose files are sorted into Sure, Guesses and No idea, with one button for every sure move, and any file can go to any folder. Approve new folders for files about one specific thing (a client, a trip, a class project), and move installers of apps you already have to Trash. Apple Intelligence's new-folder ideas are off until you turn them on. A quiet weekly reminder in the panel says when Downloads is filling up.
 - **Find files in plain words**, like “the PDF from the dentist last month”, using the same index as Finder search.
 - **What is this file?** A one-line summary of any file.
@@ -58,7 +58,7 @@ Everything happens on your Mac. EchoNyla has no analytics. The only thing it sen
 <details>
 <summary>Build and test</summary>
 
-Requires Xcode with the macOS 26 SDK.
+Requires Xcode 27 (the macOS 27 SDK). The app itself runs on macOS 26 and later.
 
 ```sh
 swift test
@@ -70,4 +70,4 @@ bash Scripts/smoke-test.sh
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The file type icons in `Resources/FileTypes` come from [vscode-icons](https://github.com/vscode-icons/vscode-icons) and are licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); branded icons keep their owners' license. The on-device model runs on [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The model itself, [Ternary Bonsai 2 9B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-9B-gguf) by PrismML (Apache 2.0), isn't included; EchoNyla downloads it only when you turn it on.
+MIT. See [LICENSE](LICENSE). The file type icons in `Resources/FileTypes` come from [vscode-icons](https://github.com/vscode-icons/vscode-icons) and are licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); branded icons keep their owners' license.

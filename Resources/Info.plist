@@ -15,9 +15,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.2.1</string>
+    <string>3.3.0</string>
     <key>CFBundleVersion</key>
-    <string>22</string>
+    <string>23</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
@@ -50,5 +50,7 @@
     <true/>
     <key>SUVerifyUpdateBeforeExtraction</key>
     <true/>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>EchoNyla listens to the first minute of voice memos, recordings and videos to give them a clear name. It happens on this Mac; nothing is uploaded.</string>
 </dict>
 </plist>

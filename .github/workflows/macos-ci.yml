@@ -10,9 +10,12 @@ permissions:
   contents: read
 
 jobs:
+  # Built with Xcode 27 on GitHub's Xcode 27 runner (macOS 27): Apple Intelligence looks at
+  # pictures of files through the macOS 27 SDK. The app still runs on macOS 26 and later. The job
+  # keeps its name because it's the required check on main.
   build-and-test:
     name: Test and package on macOS 26
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,7 +26,7 @@ jobs:
           sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
           echo "macOS SDK: $sdk_version"
           sdk_major="${sdk_version%%.*}"
-          test "$sdk_major" -ge 26
+          test "$sdk_major" -ge 27
       - name: Run packaging script tests
         run: python3 Scripts/test_checksum_sidecar.py
       - name: Check the icon definition
@@ -43,7 +46,7 @@ jobs:
       - name: Build, package, and verify app bundle and ZIP
         run: bash Scripts/package-app.sh
       - name: Verify downloadable ZIP checksum sidecar
-        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.2.1.zip
+        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.3.0.zip
       - name: Launch app smoke test
         run: bash Scripts/smoke-test.sh
       - name: Put a skin icon on the app in Finder and take it off
@@ -59,8 +62,8 @@ jobs:
         with:
           name: EchoNyla-${{ github.run_number }}
           path: |
-            dist/EchoNyla-3.2.1.zip
-            dist/EchoNyla-3.2.1.zip.sha256
+            dist/EchoNyla-3.3.0.zip
+            dist/EchoNyla-3.3.0.zip.sha256
             dist/signing.txt
           if-no-files-found: error
           retention-days: 30
@@ -90,30 +93,6 @@ jobs:
             exit 1
           fi
           echo "Info.plist's SUPublicEDKey matches the release signing key."
-
-  # The on-device model end to end: downloads Ternary Bonsai 2 9B, loads it in the embedded
-  # llama.cpp engine, shows it a screenshot and checks the structured answer, with time and peak
-  # memory. Manual runs only (Actions → Run workflow): GitHub's Mac runners have no usable graphics
-  # chip, so it runs on the processor and takes about 40 minutes. Mac timings are much faster.
-  model-check:
-    name: Check the on-device model
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Build the model check
-        run: swift build -c release --product EchoNylaModelCheck
-      - name: Download the model, read a screenshot, check the answer
-        run: |
-          check=".build/release/EchoNylaModelCheck"
-          if "$check" --folder "$RUNNER_TEMP/model"; then
-            exit 0
-          fi
-          echo "With the graphics chip it didn't pass; trying the processor only."
-          "$check" --folder "$RUNNER_TEMP/model" --cpu --image-tokens 512
 
   # Publishes a release when main has a version that hasn't been released yet, from the app this
   # run just built and tested. Runs on Linux (cheaper minutes). The download is published first

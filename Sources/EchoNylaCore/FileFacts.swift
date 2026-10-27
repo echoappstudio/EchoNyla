@@ -58,9 +58,16 @@ public struct FileFacts: Equatable, Sendable {
     /// What an image shows, from Apple's on-device image classification (e.g. "receipt", "document").
     public var imageLabels: [String]
     public var pageCount: Int?
+    /// Words spoken at the start of a recording or video (its first minute), from Apple's on-device speech recognition.
+    public var speech: String
+    /// People, places and companies named in the text, from Apple's Natural Language framework.
+    public var names: [String]
+    /// The text's language when it isn't English ("French"), from Natural Language.
+    public var language: String?
 
     public init(fileName: String, byteCount: Int64? = nil, modified: Date? = nil, isScreenshot: Bool = false,
-                downloadedFrom: [String] = [], text: String = "", imageLabels: [String] = [], pageCount: Int? = nil) {
+                downloadedFrom: [String] = [], text: String = "", imageLabels: [String] = [], pageCount: Int? = nil,
+                speech: String = "", names: [String] = [], language: String? = nil) {
         self.fileName = fileName
         self.kind = FileKind.from(fileExtension: URL(fileURLWithPath: fileName).pathExtension)
         self.byteCount = byteCount
@@ -70,13 +77,17 @@ public struct FileFacts: Equatable, Sendable {
         self.text = text
         self.imageLabels = imageLabels
         self.pageCount = pageCount
+        self.speech = speech
+        self.names = names
+        self.language = language
     }
 
     public var fileExtension: String { URL(fileURLWithPath: fileName).pathExtension.lowercased() }
 
     /// True when something beyond the file name tells what the file is.
     public var hasContentEvidence: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imageLabels.isEmpty || !downloadedFrom.isEmpty
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !imageLabels.isEmpty || !downloadedFrom.isEmpty
     }
 
     /// The facts as Apple Intelligence sees them. Long numbers (account, card, order and phone
@@ -87,9 +98,15 @@ public struct FileFacts: Equatable, Sendable {
         if let pageCount { lines.append("Pages: \(pageCount)") }
         if !downloadedFrom.isEmpty { lines.append("Downloaded from: \(downloadedFrom.joined(separator: ", "))") }
         if !imageLabels.isEmpty { lines.append("The image shows: \(imageLabels.joined(separator: ", "))") }
+        if !names.isEmpty { lines.append("Names in it: \(TextTools.redactLongNumbers(names.joined(separator: ", ")))") }
+        if let language { lines.append("Language: \(language)") }
         let cleanText = TextTools.collapseWhitespace(text)
         if !cleanText.isEmpty {
             lines.append("Text inside the file (start): \(TextTools.redactLongNumbers(String(cleanText.prefix(textLimit))))")
+        }
+        let cleanSpeech = TextTools.collapseWhitespace(speech)
+        if !cleanSpeech.isEmpty {
+            lines.append("Spoken in the first minute: \(TextTools.redactLongNumbers(String(cleanSpeech.prefix(textLimit))))")
         }
         return lines.joined(separator: "\n")
     }

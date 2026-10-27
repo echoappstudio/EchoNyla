@@ -33,33 +33,15 @@ final class IntelligenceTests: XCTestCase {
         XCTAssertEqual(AIFolders.choosable(folders, locked: ["shots"]).map(\.id), ["bills", "taxes", "work"])
         let undescribed = [Destination(id: "school", name: "School"), Destination(id: "csv", name: "CSV")]
         XCTAssertEqual(AIFolders.choosable(undescribed, locked: []), [])
-        let paper = DecisionCheck.check(folder: "School", confidence: "high", reason: "A research paper.", betterName: "", summary: "",
-                                        fileName: "paper.pdf", destinations: undescribed, locked: [])
-        XCTAssertNil(paper.destinationID)
-        XCTAssertFalse(paper.isConfident)
-        let prompt = DecisionPrompt.make(facts: FileFacts(fileName: "paper.pdf"), destinations: undescribed, locked: [], examples: [])
-        XCTAssertTrue(prompt.contains("There are no folders to choose from. Answer none for the folder."))
-        XCTAssertFalse(prompt.contains("School"))
-    }
-
-    func testDecisionIsConfidentOnlyWithAFolderAndHighConfidence() {
-        let sure = DecisionCheck.check(folder: "Taxes", confidence: "high", reason: "  A 2025 IRS\nform. ", betterName: "2025 tax return",
-                                       summary: "A tax return.", fileName: "scan0042.pdf", destinations: folders, locked: [])
-        XCTAssertEqual(sure.destinationID, "taxes")
-        XCTAssertTrue(sure.isConfident)
-        XCTAssertEqual(sure.reason, "A 2025 IRS form.")
-        XCTAssertEqual(sure.proposedName, "2025 tax return.pdf")
-        let unsure = DecisionCheck.check(folder: "Taxes", confidence: "low", reason: "", betterName: "", summary: "",
-                                         fileName: "a.pdf", destinations: folders, locked: [])
-        // A guess is not a suggestion.
-        XCTAssertNil(unsure.destinationID)
-        XCTAssertFalse(unsure.isConfident)
-        XCTAssertEqual(unsure.reason, "Apple Intelligence's best match.")
-        XCTAssertNil(unsure.proposedName)
-        let noFolder = DecisionCheck.check(folder: "Elsewhere", confidence: "high", reason: "x", betterName: "", summary: "",
-                                           fileName: "a.pdf", destinations: folders, locked: [])
-        XCTAssertNil(noFolder.destinationID)
-        XCTAssertFalse(noFolder.isConfident)
+        let paper = ModelDecisionCheck.check(ModelAnswer(whatItIs: "A research paper.", name: "", nameConfidence: 0, folder: "School",
+                                                         folderConfidence: 95),
+                                             facts: FileFacts(fileName: "paper.pdf", text: "A research paper on school"),
+                                             destinations: undescribed, locked: [])
+        XCTAssertNil(paper.decision.destinationID)
+        XCTAssertFalse(paper.decision.isConfident)
+        let instructions = ModelPrompt.instructions(destinations: undescribed, locked: [])
+        XCTAssertTrue(instructions.hasSuffix("There are no folders to choose from: answer none for the folder."))
+        XCTAssertFalse(instructions.contains("School"))
     }
 
     func testRenamesKeepTheExtensionAndRejectBadNames() {
@@ -166,16 +148,17 @@ final class IntelligenceTests: XCTestCase {
                                         sampleName: "export.csv")
         let examples = DecisionPrompt.examples(learning: learning + [csvExample], destinations: folders, locked: ["shots"])
         XCTAssertEqual(examples, ["“W2 2025.pdf” → Taxes", "“Comcast 0042.pdf” → Bills"])
-        let prompt = DecisionPrompt.make(facts: FileFacts(fileName: "a.pdf"), destinations: folders, locked: ["shots"], examples: examples)
-        XCTAssertTrue(prompt.contains("""
-            Folders you may choose (exact name: what goes there):
+        let instructions = ModelPrompt.instructions(destinations: folders, locked: ["shots"])
+        XCTAssertTrue(instructions.contains("""
+            Folders (exact name: note on what goes there):
             - Bills: Utility and phone bills
             - Taxes: IRS forms and tax returns
             - Work Projects: Client project files
             """))
-        XCTAssertTrue(prompt.contains("- “W2 2025.pdf” → Taxes"))
-        XCTAssertFalse(prompt.contains("Screenshots"))
-        XCTAssertFalse(prompt.contains("CSV"))
+        XCTAssertFalse(instructions.contains("Screenshots"))
+        XCTAssertFalse(instructions.contains("CSV"))
+        let question = ModelPrompt.question(facts: FileFacts(fileName: "a.pdf"), examples: examples, hasPicture: false)
+        XCTAssertTrue(question.contains("- “W2 2025.pdf” → Taxes"))
     }
 
     func testExamplesSkipNamesThatSayNothingAndTheFileBeingTested() {

@@ -1,6 +1,6 @@
 import Foundation
 
-// Deep Reorganize (3.2.0): Bonsai goes through whole folders, names files and sorts them into your
+// Deep Reorganize (3.2.0): the model goes through whole folders, names files and sorts them into your
 // "Sort into this" folders. These are the parts that don't need a Mac: which files to skip, new
 // folders from what files have in common, exact duplicates, a zip's contents and the time left.
 
@@ -35,7 +35,7 @@ public enum ReorganizeTime {
 
 // MARK: - New folders from what files have in common
 
-/// Files Bonsai couldn't place that are clearly about the same thing (a name, an app, a client, a
+/// Files the model couldn't place that are clearly about the same thing (a name, an app, a client, a
 /// trip that turns up in what each file is) become a suggested new folder. Judged by content, not
 /// by similar file names; broad words like "invoice" or "school" never name a folder.
 public enum ContentGrouping {
@@ -44,7 +44,7 @@ public enum ContentGrouping {
         public var ids: [String]
     }
 
-    /// `items`: each file's id and what's known about it (Bonsai's description and new name).
+    /// `items`: each file's id and what's known about it (the model's description and new name).
     public static func groups(_ items: [(id: String, text: String)], minimumSize: Int = 3, existingNames: [String] = [],
                               limit: Int = 8) -> [Group] {
         let blocked = Set(GroupCheck.broadWords.map(Words.stem))
@@ -140,7 +140,7 @@ public enum DuplicateFinder {
 // MARK: - What's inside a zip
 
 /// The names of the files in a zip, read from its table of contents at the end of the file, so
-/// Bonsai can name an archive after what's in it. Nothing is unpacked.
+/// The model can name an archive after what's in it. Nothing is unpacked.
 public enum ZipListing {
     /// How much of the end of a zip to read.
     public static let tailBytes = 2 * 1024 * 1024
@@ -193,5 +193,47 @@ public enum ZipListing {
 
     private static func uint32(_ bytes: [UInt8], _ at: Int) -> UInt32 {
         UInt32(bytes[at]) | UInt32(bytes[at + 1]) << 8 | UInt32(bytes[at + 2]) << 16 | UInt32(bytes[at + 3]) << 24
+    }
+}
+
+/// Files Apple Intelligence already named, or that you approved or left as they are, so Deep
+/// Reorganize and Check This Folder don't look at them again. A file counts as the same while its
+/// place, size and modification date stay the same; when it changes, it's looked at again.
+public struct ReviewedFiles: Codable, Equatable, Sendable {
+    /// The most kept; the oldest go first.
+    public static let limit = 20_000
+    private var added: [String: Date] = [:]
+
+    public init() {}
+
+    public static func key(path: String, size: Int64, modified: Date) -> String {
+        "\(path)|\(size)|\(Int(modified.timeIntervalSince1970))"
+    }
+
+    public var count: Int { added.count }
+
+    public func contains(_ key: String) -> Bool { added[key] != nil }
+
+    public mutating func insert(_ key: String, at date: Date = Date()) {
+        added[key] = date
+        guard added.count > Self.limit else { return }
+        let oldest = added.sorted { $0.value < $1.value }.prefix(added.count - Self.limit)
+        for (old, _) in oldest { added[old] = nil }
+    }
+
+    public static var fileURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("EchoNyla", isDirectory: true).appendingPathComponent("reviewed-files.json")
+    }
+
+    public static func load(from url: URL = fileURL) -> ReviewedFiles {
+        guard let data = try? Data(contentsOf: url) else { return ReviewedFiles() }
+        return (try? JSONDecoder().decode(ReviewedFiles.self, from: data)) ?? ReviewedFiles()
+    }
+
+    public func save(to url: URL = fileURL) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(self) { try? data.write(to: url, options: .atomic) }
     }
 }

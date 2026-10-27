@@ -53,6 +53,31 @@ final class ReorganizeTests: XCTestCase {
                        "/b/Lease.pdf")
     }
 
+    func testFilesAlreadyLookedAtAreRememberedUntilTheyChange() throws {
+        let day = Date(timeIntervalSince1970: 1_793_000_000)
+        var reviewed = ReviewedFiles()
+        let key = ReviewedFiles.key(path: "/Users/x/Downloads/Acme invoice.pdf", size: 1200, modified: day)
+        reviewed.insert(key)
+        XCTAssertTrue(reviewed.contains(key))
+        // Edited, moved or renamed since: looked at again.
+        XCTAssertFalse(reviewed.contains(ReviewedFiles.key(path: "/Users/x/Downloads/Acme invoice.pdf", size: 1300, modified: day)))
+        XCTAssertFalse(reviewed.contains(ReviewedFiles.key(path: "/Users/x/Downloads/Acme invoice.pdf", size: 1200,
+                                                           modified: day.addingTimeInterval(60))))
+        XCTAssertFalse(reviewed.contains(ReviewedFiles.key(path: "/Users/x/Desktop/Acme invoice.pdf", size: 1200, modified: day)))
+        // Saved and read back.
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("reviewed-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        reviewed.save(to: file)
+        XCTAssertEqual(ReviewedFiles.load(from: file), reviewed)
+        XCTAssertEqual(ReviewedFiles.load(from: file.appendingPathExtension("missing")).count, 0)
+        // The oldest go first past the limit.
+        var full = ReviewedFiles()
+        for number in 0...ReviewedFiles.limit { full.insert("k\(number)", at: day.addingTimeInterval(Double(number))) }
+        XCTAssertEqual(full.count, ReviewedFiles.limit)
+        XCTAssertFalse(full.contains("k0"))
+        XCTAssertTrue(full.contains("k\(ReviewedFiles.limit)"))
+    }
+
     func testAZipsContentsAreReadFromItsTableOfContents() throws {
         let zip = Self.zip(["newfo/", "newfo/Screenshot 2026-10-25 at 12.33.07 AM (2).png", "__MACOSX/newfo/._x.png",
                             "newfo/2-send-to-hermes-readmes.md", "newfo/.DS_Store"])
