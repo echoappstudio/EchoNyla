@@ -135,7 +135,10 @@ public enum GroupCheck {
     /// Keeps only groups with a valid, specific name and at least `minimumSize` files. File numbers
     /// from the model start at 1; each file can be in one group only (the first one that claims it),
     /// unknown numbers are ignored, and two groups can't share a name. At most 8 groups.
-    public static func validate(_ groups: [(name: String, members: [Int])], fileCount: Int, minimumSize: Int) -> [FolderGroupProposal] {
+    /// With `memberTexts` (each file's name and text, by position), the group's name must also appear
+    /// in most of its files: a made-up name like "allsame" for files that only look alike is dropped.
+    public static func validate(_ groups: [(name: String, members: [Int])], fileCount: Int, minimumSize: Int,
+                                memberTexts: [String]? = nil) -> [FolderGroupProposal] {
         var used: Set<Int> = []
         var names: Set<String> = []
         var result: [FolderGroupProposal] = []
@@ -147,22 +150,41 @@ public enum GroupCheck {
                 if !used.contains(index), !indexes.contains(index) { indexes.append(index) }
             }
             guard indexes.count >= max(2, minimumSize) else { continue }
+            if let memberTexts, !nameIsInFiles(name, texts: indexes.map { $0 < memberTexts.count ? memberTexts[$0] : "" }) { continue }
             used.formUnion(indexes)
             names.insert(name.lowercased())
             result.append(FolderGroupProposal(name: name, indexes: indexes.sorted()))
         }
         return result
     }
+
+    /// True when a specific word of the group's name ("Denver" in "Denver trip") is in at least half
+    /// of the files' names or text.
+    static func nameIsInFiles(_ name: String, texts: [String]) -> Bool {
+        let words = name.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 3 && !broadWords.contains($0) && !$0.allSatisfy(\.isNumber) }
+        guard !words.isEmpty, !texts.isEmpty else { return false }
+        let matching = texts.filter { text in
+            let lower = text.lowercased()
+            return words.contains { lower.contains($0) }
+        }
+        return matching.count * 2 >= texts.count
+    }
 }
 
 /// The prompt for one file: its facts, the folders you described, and how you filed similar files before.
 public enum DecisionPrompt {
-    public static func examples(learning: [LearningRecord], destinations: [Destination], locked: Set<String>, limit: Int = 8) -> [String] {
+    /// Your latest moves as examples. Names that say nothing ("Screenshot 2026-10-25 at 12.33.39 AM")
+    /// are left out: they only teach "screenshots went there", which pulled every screenshot into one
+    /// folder. `leavingOut` drops the file being tested and its copies ("… (2).png").
+    public static func examples(learning: [LearningRecord], destinations: [Destination], locked: Set<String>, limit: Int = 8,
+                                leavingOut fileName: String? = nil) -> [String] {
         let allowed = AIFolders.choosable(destinations, locked: locked)
         var seen: Set<String> = []
         var lines: [String] = []
         for record in learning.sorted(by: { $0.updatedAt > $1.updatedAt }) {
-            guard lines.count < limit, let sample = record.sampleName,
+            guard lines.count < limit, let sample = record.sampleName, !NameQuality.saysNothing(sample),
+                  !(fileName.map { NameQuality.isSameName($0, sample) } ?? false),
                   let folder = allowed.first(where: { $0.id == record.destinationID }) else { continue }
             let key = sample.lowercased()
             guard !seen.contains(key) else { continue }

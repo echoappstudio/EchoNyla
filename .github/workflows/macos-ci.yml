@@ -43,7 +43,7 @@ jobs:
       - name: Build, package, and verify app bundle and ZIP
         run: bash Scripts/package-app.sh
       - name: Verify downloadable ZIP checksum sidecar
-        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.1.1.zip
+        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.1.2.zip
       - name: Launch app smoke test
         run: bash Scripts/smoke-test.sh
       - name: Put a skin icon on the app in Finder and take it off
@@ -59,8 +59,8 @@ jobs:
         with:
           name: EchoNyla-${{ github.run_number }}
           path: |
-            dist/EchoNyla-3.1.1.zip
-            dist/EchoNyla-3.1.1.zip.sha256
+            dist/EchoNyla-3.1.2.zip
+            dist/EchoNyla-3.1.2.zip.sha256
             dist/signing.txt
           if-no-files-found: error
           retention-days: 30
@@ -93,11 +93,11 @@ jobs:
 
   # The on-device model end to end: downloads Ternary Bonsai 2 9B, loads it in the embedded
   # llama.cpp engine, shows it a screenshot and checks the structured answer, with time and peak
-  # memory. Not a required check (it depends on Hugging Face being reachable). GitHub's Mac runners
-  # may not offer the graphics chip, so it falls back to the processor; Mac timings are faster.
+  # memory. Manual runs only (Actions → Run workflow): GitHub's Mac runners have no usable graphics
+  # chip, so it runs on the processor and takes about 40 minutes. Mac timings are much faster.
   model-check:
     name: Check the on-device model
-    if: github.event_name != 'push'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-26
     timeout-minutes: 60
     steps:

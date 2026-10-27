@@ -44,9 +44,21 @@ struct ModelTestReport {
     let barAfter: Int
     /// Old name → new name, for files whose names said nothing.
     let renames: [(String, String)]
-    /// File, the folder Bonsai named (or "none"), the folder you chose.
-    let misses: [(String, String, String)]
+    let misses: [ModelTestMiss]
+    /// Your folder, the folder Bonsai named instead, and how many times.
+    let mixUps: [(String, String, Int)]
     let peakMemoryBytes: UInt64
+}
+
+/// A file where Bonsai named a different folder from yours.
+struct ModelTestMiss {
+    let file: String
+    /// The folder it named, or nil for none.
+    let said: String?
+    let chose: String
+    let score: Int
+    /// It could point to words in that folder's note.
+    let quoted: Bool
 }
 
 /// A folder you cleaned, remembered for Clean Up's button and Choose Folder's menu.
@@ -745,15 +757,15 @@ final class AppModel {
         let locked = lockedDestinationIDs
         if usesLocalModel, let paths = localPaths {
             let picture = await FileInspector.picture(for: url, readContents: readContents)
-            let name = url.lastPathComponent.lowercased()
-            let history = testing ? learning.filter { $0.sampleName?.lowercased() != name } : learning
-            let examples = DecisionPrompt.examples(learning: history, destinations: destinations, locked: locked)
+            let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked,
+                                                   leavingOut: testing ? url.lastPathComponent : nil)
             let question = LocalQuestion(facts: facts, picture: picture, destinations: destinations, locked: locked,
                                          currentFolderName: currentFolderName, examples: examples,
                                          captured: FileInspector.creationDate(of: url))
             return try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar).decision
         }
-        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked)
+        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked,
+                                               leavingOut: testing ? url.lastPathComponent : nil)
         let prompt = DecisionPrompt.make(facts: facts, destinations: destinations, locked: locked, examples: examples)
         guard let answer = try? await OnDeviceModel.decide(prompt) else { return nil }
         let decision = DecisionCheck.check(folder: answer.folder, confidence: answer.confidence, reason: answer.reason,
@@ -1163,20 +1175,30 @@ final class AppModel {
 
         var trials: [ModelTrial] = []
         var renames: [(String, String)] = []
-        var misses: [(String, String, String)] = []
+        var misses: [ModelTestMiss] = []
         for (number, item) in cases.enumerated() {
             if Task.isCancelled { break }
             modelTestProgress = "Testing on your files: \(number + 1) of \(cases.count)…"
             let started = Date()
             let facts = await FileInspector.facts(for: item.url, readContents: readContents)
             guard let judged = await judge(item.url, facts: facts, testing: true) else { continue }
-            if judged.namedFolderID != item.folderID, misses.count < 8 {
-                let said = judged.namedFolderID.flatMap { destinationName(for: $0) } ?? "none"
-                misses.append((item.url.lastPathComponent, said, destinationName(for: item.folderID) ?? "?"))
+            let seconds = Date().timeIntervalSince(started)
+            // The same file can sit in two of your folders; naming either one is right.
+            var copies: Set<String> = []
+            if let named = judged.namedFolderID, named != item.folderID, let namedURL = folderURLs[named],
+               folderHoldsCopy(of: item.url, in: namedURL) {
+                copies.insert(named)
             }
-            trials.append(ModelTrial(expectedFolderID: item.folderID, namedFolderID: judged.namedFolderID,
-                                     folderConfidence: judged.folderConfidence, quotePassed: judged.quotePassed,
-                                     seconds: Date().timeIntervalSince(started)))
+            let trial = ModelTrial(expectedFolderID: item.folderID, namedFolderID: judged.namedFolderID,
+                                   folderConfidence: judged.folderConfidence, quotePassed: judged.quotePassed,
+                                   seconds: seconds, copyFolderIDs: copies)
+            trials.append(trial)
+            if !trial.isRight, misses.count < 8 {
+                misses.append(ModelTestMiss(file: item.url.lastPathComponent,
+                                            said: judged.namedFolderID.flatMap { destinationName(for: $0) },
+                                            chose: destinationName(for: item.folderID) ?? "?",
+                                            score: judged.folderConfidence, quoted: judged.quotePassed))
+            }
             if renames.count < 6, NameQuality.isUnhelpful(item.url.lastPathComponent), let name = judged.decision.proposedName {
                 renames.append((item.url.lastPathComponent, name))
             }
@@ -1192,9 +1214,25 @@ final class AppModel {
             confidenceBar.folder = bar
             persist(confidenceBar, key: Keys.confidenceBar)
         }
+        let mixUps = ModelTest.mixUps(trials).prefix(3).map { mixUp in
+            (destinationName(for: mixUp.expectedFolderID) ?? "?", destinationName(for: mixUp.namedFolderID) ?? "?", mixUp.count)
+        }
         modelTestReport = ModelTestReport(summary: ModelTest.summarize(trials, bar: confidenceBar.folder), barBefore: before,
-                                          barAfter: confidenceBar.folder, renames: renames, misses: misses,
+                                          barAfter: confidenceBar.folder, renames: renames, misses: misses, mixUps: Array(mixUps),
                                           peakMemoryBytes: LlamaEngine.peakMemory())
+    }
+
+    /// True when `folder` holds a byte-for-byte copy of `file` (under any name).
+    private func folderHoldsCopy(of file: URL, in folder: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+        guard let size = (try? file.resourceValues(forKeys: keys))?.fileSize else { return false }
+        let others = (try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys),
+                                                           options: [.skipsHiddenFiles])) ?? []
+        return others.contains { other in
+            guard other.standardizedFileURL != file.standardizedFileURL, let values = try? other.resourceValues(forKeys: keys),
+                  values.isRegularFile == true, values.fileSize == size else { return false }
+            return fileManager.contentsEqual(atPath: file.path, andPath: other.path)
+        }
     }
 
     // MARK: Clean up a folder
@@ -1512,8 +1550,9 @@ final class AppModel {
             + "one move, one case. Never group by a broad category like school, finance, work, documents or receipts, and never "
             + "by file type or date. Each group needs at least \(aiGroupMinimum) files. Most files belong to no group; leave them out."
         if let answer = try? await OnDeviceModel.groups(prompt), cleanupReviewRun == run, cleanupFolder == folder {
+            let texts = files.map { url in url.lastPathComponent + " " + (factsByPath[url.path]?.text ?? "") }
             let checked = GroupCheck.validate(answer.map { (name: $0.name, members: $0.files) }, fileCount: files.count,
-                                              minimumSize: aiGroupMinimum)
+                                              minimumSize: aiGroupMinimum, memberTexts: texts)
             aiGroups = checked.map { proposal in
                 let members = proposal.indexes.map { files[$0] }
                 return FolderGroup(id: "ai-" + proposal.name.lowercased(), name: proposal.name,
