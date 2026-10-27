@@ -11,6 +11,12 @@ struct FavoriteFolder: Codable, Equatable, Identifiable {
     var purpose: String?
 }
 
+/// A folder you cleaned, remembered for Clean Up's button and Choose Folder's menu.
+struct RecentCleanupFolder: Codable, Equatable {
+    var path: String
+    var bookmarkData: Data
+}
+
 struct CleanupEntry: Identifiable {
     var id: String { url.path }
     let url: URL
@@ -81,6 +87,8 @@ final class AppModel {
     private(set) var minimumRelatedFileCount: Int = FolderGroupingSettings.defaultMinimumRelatedFiles
     private(set) var cleanupProgress: String?
     private var aiGroups: [FolderGroup] = []
+    /// Folders you cleaned, newest first; the first is where Clean Up starts after a relaunch.
+    private(set) var recentCleanupFolders: [URL] = []
 
     private(set) var watchedFolders: [FavoriteFolder] = []
     private(set) var setupCandidates: [SetupCandidate] = []
@@ -160,6 +168,7 @@ final class AppModel {
         static let tidyReminder = "EchoNyla.tidyReminder.enabled.v1"
         static let tidyReminderDismissed = "EchoNyla.tidyReminder.dismissed.v1"
         static let renameFirst = "EchoNyla.panel.renameFirst.v1"
+        static let recentCleanupFolders = "EchoNyla.cleanup.recentFolders.v1"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -168,6 +177,10 @@ final class AppModel {
     @ObservationIgnored private let mover = FileMoveService()
     @ObservationIgnored private var cleanupScopeURL: URL?
     @ObservationIgnored private var cleanupScopeIsActive = false
+    @ObservationIgnored private var recentCleanupRecords: [RecentCleanupFolder] = []
+    /// The Apple Intelligence review of Clean Up that's running. Each new one replaces the last.
+    @ObservationIgnored private var cleanupReview: Task<Void, Never>?
+    @ObservationIgnored private var cleanupReviewRun = 0
     @ObservationIgnored private var watchStates: [String: FolderWatchState] = [:]
     @ObservationIgnored private var watchTimer: Timer?
     @ObservationIgnored private var watchScopes: [URL] = []
@@ -203,6 +216,7 @@ final class AppModel {
             ?? Self.decode(FileMoveReceipt.self, key: Keys.lastMove, defaults: defaults).map { MoveBatchReceipt(moves: [$0]) }
         activity = Self.decode([ActivityEntry].self, key: Keys.activity, defaults: defaults) ?? []
         watchedFolders = Self.decode([FavoriteFolder].self, key: Keys.watchedFolders, defaults: defaults) ?? []
+        loadRecentCleanupFolders()
     }
 
     func start() {
@@ -239,6 +253,27 @@ final class AppModel {
 
     var cleanupTitle: String {
         cleanupFolder?.lastPathComponent ?? "Choose a folder"
+    }
+
+    /// The folder Clean Up's main button cleans: the one on screen, else the last one you cleaned, else Downloads.
+    var cleanupTarget: URL {
+        cleanupFolder ?? recentCleanupFolders.first ?? downloadsDirectoryURL
+    }
+
+    /// "Clean Downloads", "Clean Documents"…
+    var cleanupButtonTitle: String {
+        CleanupFolders.buttonTitle(folderName: cleanupTarget.lastPathComponent)
+    }
+
+    /// Choose Folder's menu: Downloads, Desktop and Documents, then up to five other folders you cleaned.
+    var cleanupMenuFixedFolders: [URL] {
+        [downloadsDirectoryURL, desktopDirectoryURL, documentsDirectoryURL]
+    }
+
+    var cleanupMenuRecentFolders: [URL] {
+        let paths = CleanupFolders.menuFolders(recents: recentCleanupFolders.map { $0.standardizedFileURL.path },
+                                               fixed: cleanupMenuFixedFolders.map { $0.standardizedFileURL.path })
+        return paths.compactMap { path in recentCleanupFolders.first { $0.standardizedFileURL.path == path } }
     }
 
     var selectedMoveCount: Int {
@@ -637,6 +672,11 @@ final class AppModel {
             ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent("Desktop", isDirectory: true)
     }
 
+    var documentsDirectoryURL: URL {
+        fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent("Documents", isDirectory: true)
+    }
+
     var isWatching: Bool { watchDownloads || watchDesktop || !watchedFolders.isEmpty }
 
     /// A file is waiting for a choice, being filed, searched for, or queued from watching. An update waits for this.
@@ -780,6 +820,16 @@ final class AppModel {
 
     func startDownloadsCleanup() {
         beginCleanup(at: downloadsDirectoryURL)
+    }
+
+    /// The main button: looks at the chosen folder again.
+    func cleanChosenFolder() {
+        beginCleanup(at: cleanupTarget)
+    }
+
+    /// A folder from Choose Folder's menu.
+    func startCleanup(at folder: URL) {
+        beginCleanup(at: folder)
     }
 
     func chooseCleanupFolder() {
@@ -939,6 +989,9 @@ final class AppModel {
     }
 
     private func beginCleanup(at folder: URL, askAI: Bool = true) {
+        // A new look at a folder stops Apple Intelligence's review of the last one, so the new one gets its own.
+        if askAI || cleanupFolder?.standardizedFileURL != folder.standardizedFileURL { stopCleanupReview() }
+        if askAI { rememberCleanupFolder(folder) }
         if cleanupScopeURL?.standardizedFileURL != folder.standardizedFileURL {
             if cleanupScopeIsActive { cleanupScopeURL?.stopAccessingSecurityScopedResource() }
             cleanupScopeURL = folder
@@ -997,25 +1050,41 @@ final class AppModel {
             cleanupRows.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
             trashRows.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
             refreshFolderGroups()
-            if askAI, aiReady, !cleanupRows.isEmpty { Task { await reviewCleanupWithAI() } }
+            if askAI, aiReady, !cleanupRows.isEmpty { askAIAboutCleanup() }
         } catch {
             userError = "Could not read that folder: \(error.localizedDescription)"
         }
     }
 
+    /// Starts Apple Intelligence on the files on screen, replacing any review still running.
+    func askAIAboutCleanup() {
+        stopCleanupReview()
+        let run = cleanupReviewRun
+        cleanupReview = Task { await reviewCleanupWithAI(run: run) }
+    }
+
+    private func stopCleanupReview() {
+        cleanupReview?.cancel()
+        cleanupReview = nil
+        cleanupReviewRun += 1
+        cleanupProgress = nil
+    }
+
     /// Apple Intelligence looks at the files the local rules couldn't place (up to 40). It suggests one
     /// of your described folders only when it's sure, a clearer name (unchecked), and, when you've
-    /// turned them on, specific new-folder groups.
-    func reviewCleanupWithAI() async {
-        guard aiReady, cleanupProgress == nil, let folder = cleanupFolder else { return }
+    /// turned them on, specific new-folder groups. It stops as soon as a newer review replaces it.
+    private func reviewCleanupWithAI(run: Int) async {
+        guard aiReady, let folder = cleanupFolder else { return }
         let candidates = Array(cleanupRows.filter { !$0.hasTarget }.prefix(40))
         var factsByPath: [String: FileFacts] = [:]
         for (number, row) in candidates.enumerated() {
-            guard cleanupFolder == folder else { break }
+            guard cleanupReviewRun == run else { return }
             cleanupProgress = "Apple Intelligence is looking at \(number + 1) of \(candidates.count)…"
             let facts = await FileInspector.facts(for: row.url, readContents: readContents)
             factsByPath[row.id] = facts
-            guard let decision = await askModel(facts: facts),
+            let answer = await askModel(facts: facts)
+            guard cleanupReviewRun == run else { return }
+            guard let decision = answer,
                   let index = cleanupRows.firstIndex(where: { $0.id == row.id }), !cleanupRows[index].hasTarget else { continue }
             if let destinationID = decision.destinationID, decision.isConfident {
                 cleanupRows[index].destinationID = destinationID
@@ -1028,14 +1097,16 @@ final class AppModel {
         }
         if aiGroupsEnabled {
             cleanupProgress = "Apple Intelligence is looking for files that belong together…"
-            await groupWithAI(factsByPath: factsByPath, folder: folder)
+            await groupWithAI(factsByPath: factsByPath, folder: folder, run: run)
         }
+        guard cleanupReviewRun == run else { return }
         cleanupProgress = nil
+        cleanupReview = nil
     }
 
-    private func groupWithAI(factsByPath: [String: FileFacts], folder: URL) async {
+    private func groupWithAI(factsByPath: [String: FileFacts], folder: URL, run: Int) async {
         let unassigned = cleanupRows.filter { !$0.hasTarget }.map(\.url)
-        guard unassigned.count >= aiGroupMinimum, cleanupFolder == folder else {
+        guard unassigned.count >= aiGroupMinimum, cleanupReviewRun == run, cleanupFolder == folder else {
             refreshFolderGroups()
             return
         }
@@ -1053,7 +1124,7 @@ final class AppModel {
             + "\n\nGroup only files that belong to one specific, named thing: one trip, one class or course project, one event, "
             + "one move, one case. Never group by a broad category like school, finance, work, documents or receipts, and never "
             + "by file type or date. Each group needs at least \(aiGroupMinimum) files. Most files belong to no group; leave them out."
-        if let answer = try? await OnDeviceModel.groups(prompt), cleanupFolder == folder {
+        if let answer = try? await OnDeviceModel.groups(prompt), cleanupReviewRun == run, cleanupFolder == folder {
             let checked = GroupCheck.validate(answer.map { (name: $0.name, members: $0.files) }, fileCount: files.count,
                                               minimumSize: aiGroupMinimum)
             aiGroups = checked.map { proposal in
@@ -1326,6 +1397,38 @@ final class AppModel {
             return
         }
         persist(receipt, key: Keys.lastMove)
+    }
+
+    /// Reads the folders you cleaned, dropping any that no longer exist.
+    private func loadRecentCleanupFolders() {
+        let saved = Self.decode([RecentCleanupFolder].self, key: Keys.recentCleanupFolders, defaults: defaults) ?? []
+        var records: [RecentCleanupFolder] = []
+        var urls: [URL] = []
+        for record in saved {
+            let (resolved, stale) = resolveBookmark(record.bookmarkData)
+            guard let url = resolved, fileManager.fileExists(atPath: url.path) else { continue }
+            let path = url.standardizedFileURL.path
+            guard !records.contains(where: { $0.path == path }) else { continue }
+            let bookmark = stale ? (makeBookmark(url) ?? record.bookmarkData) : record.bookmarkData
+            records.append(RecentCleanupFolder(path: path, bookmarkData: bookmark))
+            urls.append(url)
+        }
+        recentCleanupRecords = records
+        recentCleanupFolders = urls
+        if records != saved { persist(records, key: Keys.recentCleanupFolders) }
+    }
+
+    /// Puts a folder you cleaned at the front of the remembered ones.
+    private func rememberCleanupFolder(_ folder: URL) {
+        let path = folder.standardizedFileURL.path
+        guard let bookmark = recentCleanupRecords.first(where: { $0.path == path })?.bookmarkData ?? makeBookmark(folder) else { return }
+        var known: [String: (record: RecentCleanupFolder, url: URL)] = [:]
+        for (record, url) in zip(recentCleanupRecords, recentCleanupFolders) { known[record.path] = (record, url) }
+        known[path] = (RecentCleanupFolder(path: path, bookmarkData: bookmark), folder)
+        let kept = CleanupFolders.remembering(path, in: recentCleanupRecords.map { $0.path }).compactMap { known[$0] }
+        recentCleanupRecords = kept.map { $0.record }
+        recentCleanupFolders = kept.map { $0.url }
+        persist(recentCleanupRecords, key: Keys.recentCleanupFolders)
     }
 
     private func resolve(_ folder: FavoriteFolder) -> URL? {

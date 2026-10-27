@@ -23,6 +23,46 @@ public enum CleanupBucket: String, CaseIterable, Sendable {
     }
 }
 
+/// Which folder Clean Up works on: the main button's name and the folders in Choose Folder's menu.
+public enum CleanupFolders {
+    /// Extra folders the menu lists under Downloads, Desktop and Documents.
+    public static let menuLimit = 5
+    /// How many folders are remembered (enough for `menuLimit` extras plus the three fixed ones).
+    public static let storedLimit = menuLimit + 3
+    /// Longer folder names are shortened on the button.
+    public static let nameLimit = 28
+
+    /// "Clean Downloads", "Clean Documents". A long name ends in "…" so the button stays short.
+    public static func buttonTitle(folderName: String) -> String {
+        guard folderName.count > nameLimit else { return "Clean \(folderName)" }
+        let short = String(folderName.prefix(nameLimit - 1)).trimmingCharacters(in: .whitespaces)
+        return "Clean \(short)…"
+    }
+
+    /// The remembered folders after cleaning `path`, newest first: it moves to the front, once.
+    public static func remembering(_ path: String, in recents: [String]) -> [String] {
+        let path = normalized(path)
+        let rest = recents.map(normalized).filter { $0 != path }
+        var seen: Set<String> = [path]
+        return Array(([path] + rest.filter { seen.insert($0).inserted }).prefix(storedLimit))
+    }
+
+    /// The remembered folders the menu lists, newest first, leaving out the fixed ones it always shows.
+    public static func menuFolders(recents: [String], fixed: [String]) -> [String] {
+        let fixed = Set(fixed.map(normalized))
+        var seen: Set<String> = []
+        let extras = recents.map(normalized).filter { !fixed.contains($0) && seen.insert($0).inserted }
+        return Array(extras.prefix(menuLimit))
+    }
+
+    /// The same folder always compares equal, with or without a trailing slash.
+    static func normalized(_ path: String) -> String {
+        var path = path
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path
+    }
+}
+
 /// Recognises a file you moved yourself, in Finder, from a watched folder into one of your favorite
 /// folders: the same name and size turning up there. That move counts as your choice, so EchoNyla
 /// learns from it as it does from a click on "Move to".

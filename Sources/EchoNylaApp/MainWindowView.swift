@@ -380,25 +380,71 @@ struct ActivityTab: View {
 
 // MARK: - Clean up
 
+/// Choose Folder: Downloads, Desktop and Documents, the other folders you cleaned lately, and any other folder.
+struct CleanupFolderMenu: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Menu {
+            ForEach(model.cleanupMenuFixedFolders, id: \.self) { folder in
+                folderButton(folder)
+            }
+            let recent = model.cleanupMenuRecentFolders
+            if !recent.isEmpty {
+                Divider()
+                ForEach(recent, id: \.self) { folder in
+                    folderButton(folder)
+                }
+            }
+            Divider()
+            Button("Other Folder…") { model.chooseCleanupFolder() }
+        } label: {
+            Label("Choose Folder", systemImage: "folder")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .font(.caption.weight(.medium))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .background(NylaStyle.wash(0.08), in: Capsule())
+        .overlay(Capsule().strokeBorder(NylaStyle.hairline, lineWidth: 1))
+        .help("Pick the folder to clean up")
+    }
+
+    private func folderButton(_ folder: URL) -> some View {
+        let isCurrent = model.cleanupTarget.standardizedFileURL == folder.standardizedFileURL
+        return Button {
+            model.startCleanup(at: folder)
+        } label: {
+            if isCurrent {
+                Label(folder.lastPathComponent, systemImage: "checkmark")
+            } else {
+                Text(folder.lastPathComponent)
+            }
+        }
+    }
+}
+
 struct CleanUpTab: View {
     @Environment(AppModel.self) private var model
     @State private var confirmMove = false
     @State private var confirmSure = false
     @State private var confirmTrash = false
 
+    private var emptyHint: String {
+        "Press \(model.cleanupButtonTitle), or choose another folder."
+    }
+
     var body: some View {
         Page(title: "Clean Up", subtitle: "Review a folder's loose files. Nothing moves, gets renamed or goes to Trash until you approve it.") {
             HStack(spacing: 10) {
-                Button("Clean Downloads", systemImage: "arrow.down.circle") { model.startDownloadsCleanup() }
+                Button(model.cleanupButtonTitle, systemImage: "arrow.down.circle") { model.cleanChosenFolder() }
                     .buttonStyle(.brass)
-                Button("Choose Folder…", systemImage: "folder") { model.chooseCleanupFolder() }
-                    .buttonStyle(.pill)
+                CleanupFolderMenu()
                 Spacer()
                 if model.cleanupFolder != nil, model.aiReady, model.cleanupProgress == nil {
-                    Button("Ask Apple Intelligence Again", systemImage: "sparkles") {
-                        Task { await model.reviewCleanupWithAI() }
-                    }
-                    .buttonStyle(.pill)
+                    Button("Ask Apple Intelligence Again", systemImage: "sparkles") { model.askAIAboutCleanup() }
+                        .buttonStyle(.pill)
                 }
             }
             if let progress = model.cleanupProgress {
@@ -412,7 +458,7 @@ struct CleanUpTab: View {
             }
             if model.cleanupFolder == nil {
                 ContentUnavailableView("Choose a folder to clean up", systemImage: "sparkles.rectangle.stack",
-                                       description: Text("Start with Downloads, or pick any folder."))
+                                       description: Text(emptyHint))
                     .frame(maxWidth: .infinity, minHeight: 220)
             } else if model.cleanupRows.isEmpty && model.trashRows.isEmpty {
                 Card { Caption("No loose files to review in \(model.cleanupTitle).") }

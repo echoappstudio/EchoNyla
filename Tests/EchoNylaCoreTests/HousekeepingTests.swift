@@ -14,6 +14,36 @@ final class HousekeepingTests: XCTestCase {
         XCTAssertEqual(CleanupBucket.allCases.map(\.title), ["Sure", "Guesses", "No idea"])
     }
 
+    // MARK: Which folder Clean Up works on
+
+    func testTheMainButtonIsNamedAfterTheFolder() {
+        XCTAssertEqual(CleanupFolders.buttonTitle(folderName: "Downloads"), "Clean Downloads")
+        XCTAssertEqual(CleanupFolders.buttonTitle(folderName: "Documents"), "Clean Documents")
+        XCTAssertEqual(CleanupFolders.buttonTitle(folderName: String(repeating: "a", count: 28)), "Clean " + String(repeating: "a", count: 28))
+        XCTAssertEqual(CleanupFolders.buttonTitle(folderName: "Sam's very long project folder name 2026"), "Clean Sam's very long project fol…")
+    }
+
+    func testTheFolderYouCleanMovesToTheFrontOnce() {
+        let recents = ["/Users/sam/Documents", "/Users/sam/Projects/Trip", "/Users/sam/Downloads"]
+        XCTAssertEqual(CleanupFolders.remembering("/Users/sam/Downloads/", in: recents),
+                       ["/Users/sam/Downloads", "/Users/sam/Documents", "/Users/sam/Projects/Trip"])
+        XCTAssertEqual(CleanupFolders.remembering("/Users/sam/Music", in: []), ["/Users/sam/Music"])
+        let many = (1...10).map { "/Users/sam/F\($0)" }
+        let kept = CleanupFolders.remembering("/Users/sam/New", in: many)
+        XCTAssertEqual(kept.count, CleanupFolders.storedLimit)
+        XCTAssertEqual(kept.first, "/Users/sam/New")
+        XCTAssertEqual(kept.last, "/Users/sam/F7")
+    }
+
+    func testTheMenuListsOtherRecentFoldersButNotTheFixedOnes() {
+        let fixed = ["/Users/sam/Downloads", "/Users/sam/Desktop", "/Users/sam/Documents"]
+        let recents = ["/Users/sam/Documents", "/Users/sam/A", "/Users/sam/Downloads/", "/Users/sam/B", "/Users/sam/C",
+                       "/Users/sam/Desktop", "/Users/sam/D", "/Users/sam/E", "/Users/sam/F"]
+        XCTAssertEqual(CleanupFolders.menuFolders(recents: recents, fixed: fixed),
+                       ["/Users/sam/A", "/Users/sam/B", "/Users/sam/C", "/Users/sam/D", "/Users/sam/E"])
+        XCTAssertEqual(CleanupFolders.menuFolders(recents: [], fixed: fixed), [])
+    }
+
     // MARK: Moves made in Finder
 
     private func snapshot(_ path: String, _ size: Int64) -> FileSnapshot {
