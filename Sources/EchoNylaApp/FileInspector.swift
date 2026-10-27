@@ -7,6 +7,49 @@ import PDFKit
 import QuickLookThumbnailing
 import Vision
 
+/// A file's facts and, for Bonsai, its picture (only when its words don't say enough), read before asking the model.
+struct PreparedFile: Sendable {
+    let facts: FileFacts
+    let picture: RGBImage?
+    let captured: Date?
+
+    static func read(_ url: URL, readContents: Bool, withPicture: Bool) async -> PreparedFile {
+        let facts = await FileInspector.facts(for: url, readContents: readContents)
+        let picture = withPicture && PictureNeed.wanted(facts) ? await FileInspector.picture(for: url, readContents: readContents) : nil
+        return PreparedFile(facts: facts, picture: picture, captured: FileInspector.creationDate(of: url))
+    }
+}
+
+/// Reads files one step ahead: while the model works on one file, the next one's text and
+/// picture are already being read.
+@MainActor
+final class FilePreparer {
+    private let readContents: Bool
+    private let withPicture: Bool
+    private var ahead: (url: URL, task: Task<PreparedFile, Never>)?
+
+    init(readContents: Bool, withPicture: Bool) {
+        self.readContents = readContents
+        self.withPicture = withPicture
+    }
+
+    /// `url`, read (or waited for, if it was read ahead), and starts reading `next`.
+    func prepare(_ url: URL, next: URL?) async -> PreparedFile {
+        let current: Task<PreparedFile, Never>
+        if let ahead, ahead.url == url { current = ahead.task } else { current = start(url) }
+        ahead = next.map { ($0, start($0)) }
+        return await current.value
+    }
+
+    private func start(_ url: URL) -> Task<PreparedFile, Never> {
+        let readContents = readContents
+        let withPicture = withPicture
+        return Task.detached(priority: .userInitiated) {
+            await PreparedFile.read(url, readContents: readContents, withPicture: withPicture)
+        }
+    }
+}
+
 /// Gathers facts about a file, entirely on this Mac. Reading inside files (PDF text, documents,
 /// text and objects in images) only happens when "Look inside files" is on in Settings.
 enum FileInspector {
@@ -130,9 +173,10 @@ enum FileInspector {
     }
 
     /// Text in an image (screenshots, photos of receipts, scans), using Apple's on-device Vision.
+    /// The accurate setting: documents may go to Bonsai with only this text and no picture.
     static func recognizedText(in image: CGImage) -> String {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .fast
+        request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         do {

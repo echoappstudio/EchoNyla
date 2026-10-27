@@ -419,6 +419,7 @@ struct ActivityRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(entry.kind == .suggested ? 2 : 1)
                         .truncationMode(.middle)
+                        .filePreview(fileURL)
                     Text(entry.detail)
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
@@ -522,9 +523,9 @@ struct ActivityRow: View {
 
     /// The file name, with its extension in small monospaced type.
     private var nameLine: some View {
-        let fileURL = URL(fileURLWithPath: entry.fileName)
-        let ext = fileURL.pathExtension
-        let stem = ext.isEmpty ? entry.fileName : fileURL.deletingPathExtension().lastPathComponent
+        let name = URL(fileURLWithPath: entry.fileName)
+        let ext = name.pathExtension
+        let stem = ext.isEmpty ? entry.fileName : name.deletingPathExtension().lastPathComponent
         return HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(entry.kind == .suggested ? fullTitle : stem)
                 .font(.system(size: 14, weight: .semibold))
@@ -536,6 +537,7 @@ struct ActivityRow: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .filePreview(fileURL)
     }
 
     /// Where it went, and whether it went by itself.
@@ -594,7 +596,10 @@ struct ActivityRow: View {
             }
             .opacity(entry.isUndone ? 0.5 : 1)
             .accessibilityHidden(true)
+            .filePreview(fileURL)
     }
+
+    private var fileURL: URL { URL(fileURLWithPath: entry.filePath) }
 
     private var symbol: String {
         switch entry.kind {

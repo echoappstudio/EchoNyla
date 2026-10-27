@@ -55,8 +55,15 @@ public struct EngineReply: Sendable {
     public var text: String
     public var promptTokens: Int
     public var generatedTokens: Int
+    /// Prompt tokens still in memory from the question before (the instructions and folders), so not read again.
+    public var rememberedTokens: Int
     /// Time for this question, including loading the model if it wasn't loaded.
     public var seconds: Double
+    /// Where the time went: loading the model, reading the picture, reading the words, writing the answer.
+    public var loadSeconds: Double
+    public var pictureSeconds: Double
+    public var readSeconds: Double
+    public var answerSeconds: Double
     /// The most memory EchoNyla has used so far (what Activity Monitor calls Memory), in bytes.
     public var peakMemoryBytes: UInt64
 }
@@ -93,8 +100,9 @@ public final class LlamaEngine: @unchecked Sendable {
         /// Layers on the Mac's graphics chip: -1 for all of them, 0 to run on the processor only.
         public var gpuLayers: Int32 = -1
         public var contextTokens: UInt32 = 6_144
-        /// Prism's recommendation for light Mac use: pictures are shrunk to at most this many tokens.
-        public var imageMaxTokens: Int32 = 1_024
+        /// Pictures are shrunk to at most this many tokens: half of Prism's 1,024, for speed. Text in a
+        /// picture is read separately (Apple's Vision), so the picture only has to show what the file looks like.
+        public var imageMaxTokens: Int32 = 512
         public var maxAnswerTokens = 320
         public var idleUnloadSeconds: Double = 60
 
@@ -108,6 +116,9 @@ public final class LlamaEngine: @unchecked Sendable {
     private var context: OpaquePointer?
     private var vision: OpaquePointer?
     private var idleUnload: DispatchWorkItem?
+    /// The start of the last conversation (the instructions and folders) and the model's memory
+    /// right after reading it, so the next file with the same start skips reading it again.
+    private var sharedStart: (text: String, state: [UInt8], position: llama_pos, tokens: Int)?
     private let cancelLock = NSLock()
     private var cancelRequested = false
     private static let backendStarted: Bool = {
@@ -129,14 +140,17 @@ public final class LlamaEngine: @unchecked Sendable {
         queue.async { self.freeModel() }
     }
 
-    /// Asks one question. `prompt` is the whole conversation; when `image` is given, `prompt`
+    /// Asks one question. `shared` is the start of the conversation that stays the same from file to
+    /// file (kept in memory between questions); `prompt` is the rest. When `image` is given, `prompt`
     /// must contain the picture marker (`marker`) exactly once. `grammar` fixes the answer's shape.
-    public func generate(paths: ModelPaths, prompt: String, image: RGBImage?, grammar: String) async throws -> EngineReply {
+    public func generate(paths: ModelPaths, shared: String = "", prompt: String, image: RGBImage?,
+                         grammar: String) async throws -> EngineReply {
         setCancelled(false)
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    continuation.resume(returning: try self.run(paths: paths, prompt: prompt, image: image, grammar: grammar))
+                    continuation.resume(returning: try self.run(paths: paths, shared: shared, prompt: prompt, image: image,
+                                                                grammar: grammar))
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -150,45 +164,73 @@ public final class LlamaEngine: @unchecked Sendable {
 
     // MARK: On the engine's queue
 
-    private func run(paths: ModelPaths, prompt: String, image: RGBImage?, grammar: String) throws -> EngineReply {
+    private func run(paths: ModelPaths, shared sharedText: String, prompt: String, image: RGBImage?,
+                     grammar: String) throws -> EngineReply {
         let started = Date()
         idleUnload?.cancel()
         try load(paths)
-        guard let model, let context, let vision else { throw EngineError.modelDidNotLoad }
+        let loadSeconds = Date().timeIntervalSince(started)
+        guard let model, let context, vision != nil else { throw EngineError.modelDidNotLoad }
         let vocab = llama_model_get_vocab(model)
+        let memory = llama_get_memory(context)
+        var timing = ReadTiming()
 
-        llama_memory_clear(llama_get_memory(context), true)
-
-        // The prompt and picture, split into text and picture chunks, then read by the model.
-        guard let chunks = mtmd_input_chunks_init() else { throw EngineError.contextDidNotStart }
-        defer { mtmd_input_chunks_free(chunks) }
-        var bitmap: OpaquePointer?
-        if let image {
-            bitmap = image.bytes.withUnsafeBufferPointer { buffer in
-                mtmd_bitmap_init(UInt32(image.width), UInt32(image.height), buffer.baseAddress)
-            }
-        }
-        defer { if let bitmap { mtmd_bitmap_free(bitmap) } }
-        let tokenized: Int32 = prompt.withCString { text in
-            var input = mtmd_input_text(text: text, text_len: strlen(text), add_special: true, parse_special: true)
-            if let bitmap {
-                var bitmaps: [OpaquePointer?] = [bitmap]
-                return bitmaps.withUnsafeMutableBufferPointer { pointer in
-                    mtmd_tokenize(vision, chunks, &input, pointer.baseAddress, 1)
-                }
-            }
-            return mtmd_tokenize(vision, chunks, &input, nil, 0)
-        }
-        guard tokenized == 0 else { throw EngineError.pictureNotRead(tokenized) }
-        let promptTokens = Int(mtmd_helper_get_n_tokens(chunks))
-
+        // The shared start: put back from memory when it's the same as last time, otherwise read and remembered.
+        llama_memory_clear(memory, true)
         var position: llama_pos = 0
-        let evaluated = mtmd_helper_eval_chunks(vision, context, chunks, 0, 0, 512, true, &position)
-        guard evaluated == 0 else { throw EngineError.evaluationFailed(evaluated) }
+        var promptTokens = 0
+        var remembered = 0
+        if !sharedText.isEmpty {
+            if let start = sharedStart, start.text == sharedText,
+               start.state.withUnsafeBufferPointer({ llama_state_seq_set_data(context, $0.baseAddress, $0.count, 0) }) > 0 {
+                position = start.position
+                remembered = start.tokens
+            } else {
+                sharedStart = nil
+                llama_memory_clear(memory, true)
+                let read = try evaluate(sharedText, image: nil, addSpecial: true, from: 0, logitsLast: false, timing: &timing)
+                position = read.position
+                promptTokens += read.tokens
+                var state = [UInt8](repeating: 0, count: llama_state_seq_get_size(context, 0))
+                let saved = state.withUnsafeMutableBufferPointer { llama_state_seq_get_data(context, $0.baseAddress, $0.count, 0) }
+                if saved > 0 { sharedStart = (sharedText, state, position, read.tokens) }
+            }
+        }
+        let read = try evaluate(prompt, image: image, addSpecial: sharedText.isEmpty, from: position, logitsLast: true, timing: &timing)
+        position = read.position
+        promptTokens += read.tokens + remembered
 
         // The answer, one token at a time, kept to the grammar.
-        guard let sampler = makeSampler(vocab: vocab, grammar: grammar) else { throw EngineError.badGrammar }
-        defer { llama_sampler_free(sampler) }
+        let answerStarted = Date()
+        guard let shape = llama_sampler_init_grammar(vocab, grammar, "root") else { throw EngineError.badGrammar }
+        defer { llama_sampler_free(shape) }
+        guard let chain = makeSampler(vocab: vocab) else { throw EngineError.badGrammar }
+        defer { llama_sampler_free(chain) }
+        let vocabSize = Int(llama_vocab_n_tokens(vocab))
+        var candidates = [llama_token_data](repeating: llama_token_data(id: 0, logit: 0, p: 0), count: vocabSize)
+
+        /// Runs `samplers` over every token's score and returns the chosen token.
+        func pick(_ samplers: [UnsafeMutablePointer<llama_sampler>]) -> llama_token? {
+            guard let logits = llama_get_logits_ith(context, -1) else { return nil }
+            return candidates.withUnsafeMutableBufferPointer { buffer -> llama_token? in
+                for index in 0..<vocabSize { buffer[index] = llama_token_data(id: llama_token(index), logit: logits[index], p: 0) }
+                var array = llama_token_data_array(data: buffer.baseAddress, size: vocabSize, selected: -1, sorted: false)
+                for sampler in samplers { llama_sampler_apply(sampler, &array) }
+                guard array.selected >= 0, Int(array.selected) < array.size else { return nil }
+                return array.data[Int(array.selected)].id
+            }
+        }
+
+        /// True when `token` keeps the answer in shape. Checking one token is much faster than checking all of them.
+        func fitsShape(_ token: llama_token) -> Bool {
+            var single = llama_token_data(id: token, logit: 1, p: 0)
+            return withUnsafeMutablePointer(to: &single) { pointer -> Bool in
+                var array = llama_token_data_array(data: pointer, size: 1, selected: -1, sorted: false)
+                llama_sampler_apply(shape, &array)
+                return pointer.pointee.logit.isFinite
+            }
+        }
+
         var batch = llama_batch_init(1, 0, 1)
         defer { llama_batch_free(batch) }
         var output: [UInt8] = []
@@ -196,7 +238,15 @@ public final class LlamaEngine: @unchecked Sendable {
         var piece = [CChar](repeating: 0, count: 256)
         while generated < options.maxAnswerTokens {
             if isCancelled() { throw EngineError.cancelled }
-            let token = llama_sampler_sample(sampler, context, -1)
+            // Pick freely, and only when that token breaks the shape, pick again among the tokens that fit
+            // (what llama.cpp's own tools do).
+            guard var token = pick([chain]) else { throw EngineError.evaluationFailed(-101) }
+            if !fitsShape(token) {
+                guard let fitting = pick([shape, chain]) else { throw EngineError.evaluationFailed(-102) }
+                token = fitting
+            }
+            llama_sampler_accept(shape, token)
+            llama_sampler_accept(chain, token)
             if llama_vocab_is_eog(vocab, token) { break }
             let length = llama_token_to_piece(vocab, token, &piece, Int32(piece.count), 0, false)
             if length > 0 { output += piece[0..<Int(length)].map { UInt8(bitPattern: $0) } }
@@ -212,19 +262,67 @@ public final class LlamaEngine: @unchecked Sendable {
             let result = llama_decode(context, batch)
             guard result == 0 else { throw EngineError.evaluationFailed(result) }
         }
+        let finished = Date()
         return EngineReply(text: String(decoding: output, as: UTF8.self), promptTokens: promptTokens, generatedTokens: generated,
-                           seconds: Date().timeIntervalSince(started), peakMemoryBytes: Self.peakMemory())
+                           rememberedTokens: remembered, seconds: finished.timeIntervalSince(started), loadSeconds: loadSeconds,
+                           pictureSeconds: timing.picture, readSeconds: timing.text,
+                           answerSeconds: finished.timeIntervalSince(answerStarted), peakMemoryBytes: Self.peakMemory())
+    }
+
+    private struct ReadTiming {
+        var picture = 0.0
+        var text = 0.0
+    }
+
+    /// Reads `text` (and the picture, if any) into the model's memory from `start`, one chunk at a
+    /// time so the picture's time can be told apart from the words'.
+    private func evaluate(_ text: String, image: RGBImage?, addSpecial: Bool, from start: llama_pos, logitsLast: Bool,
+                          timing: inout ReadTiming) throws -> (position: llama_pos, tokens: Int) {
+        guard let context, let vision else { throw EngineError.modelDidNotLoad }
+        guard let chunks = mtmd_input_chunks_init() else { throw EngineError.contextDidNotStart }
+        defer { mtmd_input_chunks_free(chunks) }
+        var bitmap: OpaquePointer?
+        if let image {
+            bitmap = image.bytes.withUnsafeBufferPointer { buffer in
+                mtmd_bitmap_init(UInt32(image.width), UInt32(image.height), buffer.baseAddress)
+            }
+        }
+        defer { if let bitmap { mtmd_bitmap_free(bitmap) } }
+        let tokenized: Int32 = text.withCString { cText in
+            var input = mtmd_input_text(text: cText, text_len: strlen(cText), add_special: addSpecial, parse_special: true)
+            if let bitmap {
+                var bitmaps: [OpaquePointer?] = [bitmap]
+                return bitmaps.withUnsafeMutableBufferPointer { pointer in
+                    mtmd_tokenize(vision, chunks, &input, pointer.baseAddress, 1)
+                }
+            }
+            return mtmd_tokenize(vision, chunks, &input, nil, 0)
+        }
+        guard tokenized == 0 else { throw EngineError.pictureNotRead(tokenized) }
+
+        var position = start
+        var tokens = 0
+        let count = mtmd_input_chunks_size(chunks)
+        for index in 0..<count {
+            guard let chunk = mtmd_input_chunks_get(chunks, index) else { continue }
+            let chunkStarted = Date()
+            var next: llama_pos = position
+            let result = mtmd_helper_eval_chunk_single(vision, context, chunk, position, 0, 512,
+                                                       logitsLast && index == count - 1, &next)
+            guard result == 0 else { throw EngineError.evaluationFailed(result) }
+            let seconds = Date().timeIntervalSince(chunkStarted)
+            if mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT { timing.text += seconds } else { timing.picture += seconds }
+            tokens += Int(mtmd_input_chunk_get_n_tokens(chunk))
+            position = next
+        }
+        return (position, tokens)
     }
 
     /// Prism's sampling for Bonsai 2 with thinking off (temperature 0.7, top-p 0.8, top-k 20,
-    /// presence penalty 1.5 over 64 tokens), behind the grammar. A fixed seed keeps answers repeatable.
-    private func makeSampler(vocab: OpaquePointer?, grammar: String) -> UnsafeMutablePointer<llama_sampler>? {
+    /// presence penalty 1.5 over 64 tokens). The grammar is applied separately (see `run`). A fixed
+    /// seed keeps answers repeatable.
+    private func makeSampler(vocab: OpaquePointer?) -> UnsafeMutablePointer<llama_sampler>? {
         guard let chain = llama_sampler_chain_init(llama_sampler_chain_default_params()) else { return nil }
-        guard let constrained = llama_sampler_init_grammar(vocab, grammar, "root") else {
-            llama_sampler_free(chain)
-            return nil
-        }
-        llama_sampler_chain_add(chain, constrained)
         llama_sampler_chain_add(chain, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 64, 1.0, 0.0, 1.5))
         llama_sampler_chain_add(chain, llama_sampler_init_top_k(20))
         llama_sampler_chain_add(chain, llama_sampler_init_top_p(0.8, 1))
@@ -279,6 +377,7 @@ public final class LlamaEngine: @unchecked Sendable {
         context = nil
         model = nil
         loadedPaths = nil
+        sharedStart = nil
     }
 
     private func scheduleIdleUnload() {

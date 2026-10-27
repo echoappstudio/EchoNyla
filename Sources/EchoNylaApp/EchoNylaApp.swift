@@ -187,6 +187,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     func show(_ tab: MainTab) {
         AppModel.shared.selectedTab = tab
+        // The panel floats over everything; opening the full window puts it away so it isn't in front of it.
+        StatusItemController.shared.hidePanel()
         let window = self.window ?? makeWindow()
         self.window = window
         NSApp.setActivationPolicy(.regular)
