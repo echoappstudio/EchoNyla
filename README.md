@@ -24,6 +24,7 @@
 - **You decide which folders it may use.** Give a favorite folder a short note saying what goes there (“Chase statement CSV exports only”), and Apple Intelligence suggests it only for files that plainly match. Folders without a note stay yours: drag and drop, rules and your own moves only.
 - **Watches Downloads, Desktop and folders you choose.** New files are handled once they've finished downloading, with a notification to Undo or Move. Files that were already there are never touched. When you move a new file into a favorite folder yourself in Finder, EchoNyla learns from that too.
 - **Clearer names.** `document (3).pdf` can become `2026-10 Lease renewal.pdf`; renames always wait for your approval.
+- **A smarter on-device model (optional).** Download Ternary Bonsai 2 9B (about 3.2 GB) in Settings and it runs inside EchoNyla on the built-in llama.cpp engine. It looks at screenshots, photos and documents, gives files with useless names a proper name when it's sure, sorts files only when it can quote the folder's note, and can check a folder for files that don't belong. Every batch has Undo All.
 - **Clean up any folder.** Pick Downloads, Desktop, Documents or any other folder from one menu; the main button cleans it and EchoNyla remembers it. Loose files are sorted into Sure, Guesses and No idea, with one button for every sure move, and any file can go to any folder. Approve new folders for files about one specific thing (a client, a trip, a class project), and move installers of apps you already have to Trash. Apple Intelligence's new-folder ideas are off until you turn them on. A quiet weekly reminder in the panel says when Downloads is filling up.
 - **Find files in plain words**, like “the PDF from the dentist last month”, using the same index as Finder search.
 - **What is this file?** A one-line summary of any file.
@@ -69,4 +70,4 @@ bash Scripts/smoke-test.sh
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The file type icons in `Resources/FileTypes` come from [vscode-icons](https://github.com/vscode-icons/vscode-icons) and are licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); branded icons keep their owners' license.
+MIT. See [LICENSE](LICENSE). The file type icons in `Resources/FileTypes` come from [vscode-icons](https://github.com/vscode-icons/vscode-icons) and are licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); branded icons keep their owners' license. The on-device model runs on [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The model itself, [Ternary Bonsai 2 9B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-9B-gguf) by PrismML (Apache 2.0), isn't included; EchoNyla downloads it only when you turn it on.

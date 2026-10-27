@@ -185,8 +185,13 @@ final class LocalModelTests: XCTestCase {
         XCTAssertEqual(summary.sureRight, 6)
         XCTAssertEqual(summary.averageSeconds, 2)
         XCTAssertEqual(summary.recommendedBar, 85)
-        // Too few sure answers to tell: no recommendation.
+        XCTAssertEqual(ModelTest.barAfterTest(trials), 85)
+        // Too few sure answers to tell: no recommendation, and the bar stays as it is.
         XCTAssertNil(ModelTest.recommendedBar([trial("a", "a", 99)]))
+        XCTAssertNil(ModelTest.barAfterTest([trial("a", "a", 99)]))
+        // Plenty of sure answers, but wrong too often at every bar: always ask.
+        let unreliable = (0..<6).map { _ in trial("a", "b", 99) } + (0..<6).map { _ in trial("a", "a", 99) }
+        XCTAssertEqual(ModelTest.barAfterTest(unreliable), 101)
     }
 
     // MARK: Check This Folder and Undo All

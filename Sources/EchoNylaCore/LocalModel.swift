@@ -442,6 +442,15 @@ public enum ModelTest {
                                 recommendedBar: recommendedBar(trials))
     }
 
+    /// The folder bar to use after a test: the recommended bar; 101 (always ask) when there were
+    /// enough sure answers to judge but none of the bars kept them 95% right; nil (keep the current
+    /// bar) when the test had too few sure answers to say.
+    public static func barAfterTest(_ trials: [ModelTrial]) -> Int? {
+        if let bar = recommendedBar(trials) { return bar }
+        let enough = bars.contains { bar in trials.filter { $0.isSure(at: bar) }.count >= minimumSure }
+        return enough ? 101 : nil
+    }
+
     /// The lowest bar at which sure answers are right at least 95% of the time (with enough of them to tell).
     public static func recommendedBar(_ trials: [ModelTrial]) -> Int? {
         for bar in bars {

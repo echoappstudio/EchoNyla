@@ -8,7 +8,7 @@ APP="dist/EchoNyla.app"
 ICONSET="dist/AppIcon.iconset"
 ICON_OUT="dist/AppIcon-compiled"
 VERIFY_DIR="dist/verify-extracted"
-ZIP="dist/EchoNyla-3.0.1.zip"
+ZIP="dist/EchoNyla-3.1.0.zip"
 SIGNING_REPORT="dist/signing.txt"
 SIGN_MODE="${SIGN_MODE:-adhoc}"
 export SIGN_MODE
@@ -66,7 +66,11 @@ if [[ "${#LLAMA_FRAMEWORKS[@]}" -ne 1 ]]; then
 fi
 ditto --arch arm64 "${LLAMA_FRAMEWORKS[0]}" "$APP/Contents/Frameworks/llama.framework"
 test -s "$APP/Contents/Frameworks/llama.framework/Versions/A/llama"
-otool -L "$APP/Contents/MacOS/EchoNyla" | grep -F '@rpath/llama.framework/Versions/A/llama'
+if ! otool -L "$APP/Contents/MacOS/EchoNyla" | grep -F '@rpath/llama.framework/'; then
+    echo "error: EchoNyla doesn't link llama.framework from @rpath" >&2
+    otool -L "$APP/Contents/MacOS/EchoNyla" >&2
+    exit 1
+fi
 grep -F 'llama.cpp b11800' "$APP/Contents/Resources/Acknowledgements.txt"
 
 swift Scripts/GenerateIcon.swift "$ICONSET" "Resources/AppIcon-1024.png"
@@ -118,8 +122,8 @@ expect_plist() {
 plutil -lint "$APP/Contents/Info.plist"
 expect_plist LSUIElement true
 expect_plist LSMinimumSystemVersion 26.0
-expect_plist CFBundleShortVersionString 3.0.1
-expect_plist CFBundleVersion 17
+expect_plist CFBundleShortVersionString 3.1.0
+expect_plist CFBundleVersion 18
 expect_plist CFBundleIconFile AppIcon
 expect_plist CFBundleIconName AppIcon
 expect_plist SUFeedURL "https://github.com/echoappstudio/EchoNyla/releases/latest/download/appcast.xml"
@@ -165,8 +169,8 @@ expect_plist_in() {
         exit 1
     fi
 }
-expect_plist_in "$EXTRACTED_APP" CFBundleShortVersionString 3.0.1
-expect_plist_in "$EXTRACTED_APP" CFBundleVersion 17
+expect_plist_in "$EXTRACTED_APP" CFBundleShortVersionString 3.1.0
+expect_plist_in "$EXTRACTED_APP" CFBundleVersion 18
 expect_plist_in "$EXTRACTED_APP" CFBundleIconName AppIcon
 expect_plist_in "$EXTRACTED_APP" SUFeedURL "https://github.com/echoappstudio/EchoNyla/releases/latest/download/appcast.xml"
 plutil -lint "$EXTRACTED_APP/Contents/Info.plist"

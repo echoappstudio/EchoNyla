@@ -1,7 +1,10 @@
 import AppKit
-import Foundation
-import PDFKit
 import EchoNylaCore
+import EchoNylaEngine
+import Foundation
+import ImageIO
+import PDFKit
+import QuickLookThumbnailing
 import Vision
 
 /// Gathers facts about a file, entirely on this Mac. Reading inside files (PDF text, documents,
@@ -62,12 +65,53 @@ enum FileInspector {
         return facts
     }
 
-    private static func firstPageImage(_ document: PDFDocument) -> CGImage? {
+    static func firstPageImage(_ document: PDFDocument) -> CGImage? {
         guard let page = document.page(at: 0) else { return nil }
         let bounds = page.bounds(for: .mediaBox)
         let scale = min(2.0, 1_600 / max(bounds.width, 1))
         let thumbnail = page.thumbnail(of: NSSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox)
         return thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    }
+
+    /// A picture of the file for the on-device model: the image itself, a PDF's first page, or
+    /// macOS's Quick Look preview of a document, presentation, spreadsheet or video. Nil for text
+    /// and code (their words are already read) and when "Look inside files" is off.
+    static func picture(for url: URL, readContents: Bool) async -> RGBImage? {
+        guard readContents else { return nil }
+        let kind = FileKind.from(fileExtension: url.pathExtension)
+        switch kind {
+        case .image:
+            return await Task.detached(priority: .utility) {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                      let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                          kCGImageSourceCreateThumbnailFromImageAlways: true,
+                          kCGImageSourceCreateThumbnailWithTransform: true,
+                          kCGImageSourceThumbnailMaxPixelSize: 1_280
+                      ] as CFDictionary) else { return nil }
+                return RGBImage(image)
+            }.value
+        case .pdf:
+            return await Task.detached(priority: .utility) {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                guard let document = PDFDocument(url: url), let page = firstPageImage(document) else { return nil }
+                return RGBImage(page)
+            }.value
+        case .document, .presentation, .spreadsheet, .video:
+            let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 1_024, height: 1_024), scale: 1,
+                                                       representationTypes: .thumbnail)
+            guard let thumbnail = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request) else { return nil }
+            return RGBImage(thumbnail.cgImage)
+        default:
+            return nil
+        }
+    }
+
+    /// When the file was made (a screenshot's or photo's own date), for a renamed picture's date.
+    static func creationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
     }
 
     /// Text in an image (screenshots, photos of receipts, scans), using Apple's on-device Vision.
