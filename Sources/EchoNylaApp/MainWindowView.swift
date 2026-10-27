@@ -713,13 +713,11 @@ struct CleanupRowView: View {
             .disabled(!row.hasTarget)
             .padding(.top, 6)
             FileTypeIcon(fileName: row.url.lastPathComponent, path: row.url.path, size: 30)
-                .filePreview(row.url)
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.url.lastPathComponent)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .filePreview(row.url)
                 Caption(row.chosenFolder.map { "Your choice: \($0.lastPathComponent)" } ?? row.suggestionReason ?? "No suggestion. Choose a folder.")
                 if let summary = row.summary {
                     Caption(summary)
@@ -757,6 +755,7 @@ struct CleanupRowView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
+        .filePreview(row.url)
     }
 }
 
@@ -802,10 +801,8 @@ struct SearchResultRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 FileTypeIcon(fileName: result.url.lastPathComponent, path: result.url.path, size: 32)
-                    .filePreview(result.url)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.name)
-                        .filePreview(result.url)
                         .font(.callout.weight(.medium))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -822,6 +819,7 @@ struct SearchResultRow: View {
                     .disabled(!model.aiReady || model.explaining.contains(result.id))
             }
             .controlSize(.small)
+            .filePreview(result.url)
             if model.explaining.contains(result.id) {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)

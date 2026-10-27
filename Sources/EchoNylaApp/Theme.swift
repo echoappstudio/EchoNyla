@@ -405,6 +405,7 @@ struct ActivityRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardSurface(radius: 13, hovering: hovering)
         .opacity(entry.isUndone ? 0.6 : 1)
+        .filePreview(fileURL, highlights: false)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
@@ -419,7 +420,6 @@ struct ActivityRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(entry.kind == .suggested ? 2 : 1)
                         .truncationMode(.middle)
-                        .filePreview(fileURL)
                     Text(entry.detail)
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
@@ -537,7 +537,6 @@ struct ActivityRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .filePreview(fileURL)
     }
 
     /// Where it went, and whether it went by itself.
@@ -596,7 +595,6 @@ struct ActivityRow: View {
             }
             .opacity(entry.isUndone ? 0.5 : 1)
             .accessibilityHidden(true)
-            .filePreview(fileURL)
     }
 
     private var fileURL: URL { URL(fileURLWithPath: entry.filePath) }

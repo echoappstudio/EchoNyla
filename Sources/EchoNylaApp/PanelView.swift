@@ -326,12 +326,10 @@ struct PendingCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 FileTypeIcon(fileName: pending.url.lastPathComponent, path: pending.url.path, size: 30)
-                    .filePreview(pending.url)
                 Text(pending.url.lastPathComponent)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .font(.subheadline.weight(.medium))
-                    .filePreview(pending.url)
                 Spacer(minLength: 6)
                 Button { model.cancelPendingDrop() } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -340,6 +338,7 @@ struct PendingCard: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel")
             }
+            .filePreview(pending.url)
             if pending.isThinking {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

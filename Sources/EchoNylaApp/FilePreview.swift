@@ -4,34 +4,58 @@ import QuickLookThumbnailing
 import SwiftUI
 
 extension View {
-    /// Quick Look for a file shown in EchoNyla: click for the full preview (or press Space while the
-    /// pointer is on it), double-click to open it, and rest the pointer on it for a larger picture.
-    func filePreview(_ url: URL) -> some View {
-        modifier(FilePreviewModifier(url: url))
+    /// Quick Look for a file shown in EchoNyla, on its whole row: one click previews it right away
+    /// (as does Space while the pointer is on it), a double-click opens it in its app, and resting
+    /// the pointer shows a larger picture. Controls in the row (checkboxes, menus, buttons) keep
+    /// working as before. `highlights` lights the row under the pointer (off for rows that already do).
+    func filePreview(_ url: URL, highlights: Bool = true) -> some View {
+        modifier(FilePreviewModifier(url: url, highlights: highlights))
     }
 }
 
 struct FilePreviewModifier: ViewModifier {
     let url: URL
+    let highlights: Bool
+    /// How long the pointer rests before the larger picture shows. The picture is made from the
+    /// moment the pointer arrives, so it's usually ready by then.
+    static let restBeforePeek: Duration = .milliseconds(300)
+
     @State private var quickLook: URL?
     @State private var peek: NSImage?
     @State private var peeking = false
     @State private var waiting: Task<Void, Never>?
     @State private var token = UUID()
+    @State private var hovering = false
+    @State private var width: CGFloat = 1
+    @State private var pointerX: CGFloat = 0
+    /// Where along the row the picture points (where the pointer was when it showed).
+    @State private var peekX: CGFloat = 0.5
 
     func body(content: Content) -> some View {
         content
             .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                closePeek()
-                if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.open(url) } else { NSSound.beep() }
+            .background {
+                if highlights {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(hovering ? 0.06 : 0))
+                        .padding(-2)
+                }
             }
-            .onTapGesture { showQuickLook() }
-            .onHover { inside in
-                if inside { pointerArrived() } else { pointerLeft() }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max($0, 1) }
+            // One tap gesture, not a single and a double one: SwiftUI would hold every single click
+            // back to see whether a second follows. The click count tells them apart.
+            .onTapGesture { clicked() }
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    pointerX = location.x
+                    if !hovering { pointerArrived() }
+                case .ended:
+                    pointerLeft()
+                }
             }
             .onDisappear { pointerLeft() }
-            .popover(isPresented: $peeking, arrowEdge: .trailing) {
+            .popover(isPresented: $peeking, attachmentAnchor: .point(UnitPoint(x: peekX, y: 0)), arrowEdge: .top) {
                 if let peek {
                     Image(nsImage: peek)
                         .resizable()
@@ -41,6 +65,23 @@ struct FilePreviewModifier: ViewModifier {
                 }
             }
             .quickLookPreview($quickLook)
+            .help("Click to preview · Double-click to open")
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    /// The first click previews at once; the second click of a double-click closes the preview and opens the file.
+    private func clicked() {
+        closePeek()
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            NSSound.beep()
+            return
+        }
+        if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+            quickLook = nil
+            NSWorkspace.shared.open(url)
+        } else {
+            quickLook = url
+        }
     }
 
     private func showQuickLook() {
@@ -48,19 +89,25 @@ struct FilePreviewModifier: ViewModifier {
         if FileManager.default.fileExists(atPath: url.path) { quickLook = url } else { NSSound.beep() }
     }
 
-    /// After a short rest, so moving the pointer down a list doesn't flash a picture for every file.
+    /// The picture is made straight away and shown after a short rest, so moving the pointer down
+    /// a list doesn't flash one for every file.
     private func pointerArrived() {
+        hovering = true
         FilePreviewKeys.shared.hovering(token) { showQuickLook() }
         waiting?.cancel()
+        let url = url
         waiting = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(550))
-            guard !Task.isCancelled, let image = await FilePeekImages.image(for: url), !Task.isCancelled else { return }
+            async let picture = FilePeekImages.image(for: url)
+            try? await Task.sleep(for: Self.restBeforePeek)
+            guard !Task.isCancelled, let image = await picture, !Task.isCancelled, quickLook == nil else { return }
             peek = image
+            peekX = min(max(pointerX / width, 0.05), 0.95)
             peeking = true
         }
     }
 
     private func pointerLeft() {
+        hovering = false
         FilePreviewKeys.shared.left(token)
         closePeek()
     }
