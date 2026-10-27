@@ -66,12 +66,10 @@ struct FolderCheckCard: View {
     private func findingRow(_ finding: FolderCheckFinding) -> some View {
         HStack(alignment: .top, spacing: 10) {
             FileTypeIcon(fileName: finding.url.lastPathComponent, path: finding.url.path, size: 28)
-                .filePreview(finding.url)
             VStack(alignment: .leading, spacing: 2) {
                 Text(finding.url.lastPathComponent)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .filePreview(finding.url)
                 Caption("In \(model.destinationName(for: finding.folderID) ?? "a folder"). \(finding.note)")
             }
             Spacer()
@@ -89,6 +87,7 @@ struct FolderCheckCard: View {
             Button("Leave It") { model.dismissFinding(finding.id) }
                 .buttonStyle(.pill)
         }
+        .filePreview(finding.url)
     }
 }
 
