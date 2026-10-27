@@ -98,6 +98,14 @@ final class IntelligenceTests: XCTestCase {
             (name: "Biology 101 lab", members: [1, 2, 3])
         ], fileCount: 3, minimumSize: 3)
         XCTAssertEqual(broadGroups, [FolderGroupProposal(name: "Biology 101 lab", indexes: [0, 1, 2])])
+        // With the files' names and text, a group's name has to be in most of its files.
+        let texts = ["Screenshot 2026-10-25 at 12.28.31 AM.png", "IMG_4821.HEIC", "Screenshot 2026-10-25 at 12.33.39 AM.png",
+                     "Denver hotel.pdf", "Flight confirmation.pdf Denver International Airport", "Rental car.pdf"]
+        let named = GroupCheck.validate([
+            (name: "allsame", members: [1, 2, 3]),
+            (name: "Denver trip 2026", members: [4, 5, 6])
+        ], fileCount: 6, minimumSize: 3, memberTexts: texts)
+        XCTAssertEqual(named, [FolderGroupProposal(name: "Denver trip 2026", indexes: [3, 4, 5])])
         for broad in ["School", "Research papers", "CSV files", "Tax Docs", "Bank statements 2025", "Work", "Misc."] {
             XCTAssertFalse(GroupCheck.isSpecific(broad), broad)
         }
@@ -168,6 +176,23 @@ final class IntelligenceTests: XCTestCase {
         XCTAssertTrue(prompt.contains("- “W2 2025.pdf” → Taxes"))
         XCTAssertFalse(prompt.contains("Screenshots"))
         XCTAssertFalse(prompt.contains("CSV"))
+    }
+
+    func testExamplesSkipNamesThatSayNothingAndTheFileBeingTested() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let learning = [
+            LearningRecord(fileExtension: "png", tokens: [], destinationID: "bills", updatedAt: now.addingTimeInterval(30),
+                           sampleName: "Screenshot 2026-10-25 at 12.33.39 AM.png"),
+            LearningRecord(fileExtension: "heic", tokens: [], destinationID: "bills", updatedAt: now.addingTimeInterval(20), sampleName: "IMG_4821.HEIC"),
+            LearningRecord(fileExtension: "pdf", tokens: ["comcast"], destinationID: "bills", updatedAt: now.addingTimeInterval(10),
+                           sampleName: "Comcast 0042.pdf"),
+            LearningRecord(fileExtension: "pdf", tokens: ["w2"], destinationID: "taxes", updatedAt: now, sampleName: "W2 2025.pdf")
+        ]
+        XCTAssertEqual(DecisionPrompt.examples(learning: learning, destinations: folders, locked: []),
+                       ["“Comcast 0042.pdf” → Bills", "“W2 2025.pdf” → Taxes"])
+        // Testing "Comcast 0042 (2).pdf": its own past move is left out, copy mark or not.
+        XCTAssertEqual(DecisionPrompt.examples(learning: learning, destinations: folders, locked: [], leavingOut: "Comcast 0042 (2).pdf"),
+                       ["“W2 2025.pdf” → Taxes"])
     }
 }
 

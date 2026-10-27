@@ -68,6 +68,27 @@ final class SuggestionAndPolicyTests: XCTestCase {
         XCTAssertTrue(threeExamples?.reason.contains("3 examples") == true)
     }
 
+    func testLearningNeedsTheSameWordInThreeFiles() {
+        let destination = [Destination(id: "allsame", name: "allsame")]
+        let tokens = { (name: String) in SuggestionEngine.filenameTokens(name) }
+        let examples = ["Purevo waveform.png", "Verbyn settings.png", "Scout timeline.png"].map {
+            LearningRecord(fileExtension: "png", tokens: tokens($0), destinationID: "allsame", sampleName: $0)
+        }
+        // One word shared with each of three different files isn't a pattern.
+        XCTAssertNil(SuggestionEngine.suggest(fileName: "Purevo Verbyn Scout icons.png", destinations: destination, rules: [], learning: examples))
+        // Words like "edited", "before" and "after" don't count either.
+        let edited = ["Purevo before.png", "Verbyn before.png", "Scout before.png"].map {
+            LearningRecord(fileExtension: "png", tokens: tokens($0), destinationID: "allsame", sampleName: $0)
+        }
+        XCTAssertNil(SuggestionEngine.suggest(fileName: "Kitchen before.png", destinations: destination, rules: [], learning: edited))
+        // The same word in three files is.
+        let purevo = ["Purevo waveform.png", "Purevo settings.png", "Purevo skins.png"].map {
+            LearningRecord(fileExtension: "png", tokens: tokens($0), destinationID: "allsame", sampleName: $0)
+        }
+        XCTAssertEqual(SuggestionEngine.suggest(fileName: "Purevo export.png", destinations: destination, rules: [], learning: purevo)?
+            .destinationID, "allsame")
+    }
+
     func testFilenameScreenshotFallbackIsLimitedToPNG() {
         let destination = [Destination(id: "screenshots", name: "Screenshots")]
         for fileName in ["Screenshot 01.jpg", "Screen Shot 02.heic", "Screenshot 03.pdf"] {

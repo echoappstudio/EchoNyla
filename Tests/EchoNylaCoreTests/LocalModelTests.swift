@@ -137,6 +137,22 @@ final class LocalModelTests: XCTestCase {
         XCTAssertTrue(NameQuality.isUnhelpful("allsame.zip"))
         XCTAssertFalse(NameQuality.isUnhelpful("2 week notice.pages"))
         XCTAssertFalse(NameQuality.isUnhelpful("Acme Plumbing invoice.pdf"))
+        // Names with no word at all can't teach Bonsai where things go.
+        XCTAssertTrue(NameQuality.saysNothing("Screenshot 2026-10-25 at 12.33.39 AM (2).png"))
+        XCTAssertTrue(NameQuality.saysNothing("IMG_4821.HEIC"))
+        XCTAssertTrue(NameQuality.saysNothing("DSC01234.JPG"))
+        XCTAssertFalse(NameQuality.saysNothing("W2 2025.pdf"))
+        XCTAssertFalse(NameQuality.saysNothing("Comcast 0042.pdf"))
+    }
+
+    func testCopiesHaveTheSameName() {
+        XCTAssertTrue(NameQuality.isSameName("Screenshot 2026-10-25 at 12.33.39 AM (2).png", "Screenshot 2026-10-25 at 12.33.39 AM.png"))
+        XCTAssertTrue(NameQuality.isSameName("Report 2.pdf", "report.PDF"))
+        XCTAssertTrue(NameQuality.isSameName("Report copy 3.pdf", "Report.pdf"))
+        XCTAssertTrue(NameQuality.isSameName("Report copy (2).pdf", "Report.pdf"))
+        XCTAssertFalse(NameQuality.isSameName("Report.pdf", "Report.png"))
+        XCTAssertFalse(NameQuality.isSameName("Comcast 0042.pdf", "Comcast.pdf"))
+        XCTAssertFalse(NameQuality.isSameName("Invoice 2231.pdf", "Invoice 2232.pdf"))
     }
 
     func testRenamesMustComeFromTheFile() {
@@ -224,6 +240,25 @@ final class LocalModelTests: XCTestCase {
         // Plenty of sure answers, but wrong too often at every bar: always ask.
         let unreliable = (0..<6).map { _ in trial("a", "b", 99) } + (0..<6).map { _ in trial("a", "a", 99) }
         XCTAssertEqual(ModelTest.barAfterTest(unreliable), 101)
+    }
+
+    func testCopiesCountAsRightAndTheReportSaysWhyNothingWasSure() {
+        // The first real run: newfo's screenshots also sit in allsame, which Bonsai named.
+        let copy = ModelTrial(expectedFolderID: "newfo", namedFolderID: "allsame", folderConfidence: 70, quotePassed: false,
+                              seconds: 8, copyFolderIDs: ["allsame"])
+        XCTAssertTrue(copy.isRight)
+        XCTAssertTrue(copy.isCopyMatch)
+        let trials = [copy, trial("purevopic", "allsame", 75, quote: false), trial("purevopic", "allsame", 60),
+                      trial("newfo", nil, 0), trial("allsame", "allsame", 72)]
+        let summary = ModelTest.summarize(trials, bar: 80)
+        XCTAssertEqual(summary.right, 2)
+        XCTAssertEqual(summary.copies, 1)
+        XCTAssertEqual(summary.sure, 0)
+        XCTAssertEqual(summary.highestFolderScore, 75)
+        XCTAssertEqual(summary.unquoted, 2)
+        // purevopic → allsame twice is a mix-up; the copy and the single "none" aren't.
+        XCTAssertEqual(ModelTest.mixUps(trials), [FolderMixUp(expectedFolderID: "purevopic", namedFolderID: "allsame", count: 2)])
+        XCTAssertNil(ModelTest.summarize([trial("a", nil, 0)], bar: 80).highestFolderScore)
     }
 
     // MARK: Check This Folder and Undo All

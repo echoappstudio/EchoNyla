@@ -109,6 +109,7 @@ public enum SuggestionEngine {
         "project", "projects", "report", "reports", "annual", "brief", "proposal", "proposals",
         "plan", "plans", "notes", "note", "summary", "summaries", "draft", "drafts", "update", "updates",
         "meeting", "meetings", "export", "exports", "download", "downloads", "file", "files",
+        "edited", "edit", "before", "after", "version", "untitled", "recording", "recordings", "clip", "clips", "temp",
         "company", "companies", "corporation", "corp", "inc", "llc", "ltd", "limited", "group",
         "pdf", "png", "jpg", "jpeg", "heic", "tif", "tiff", "doc", "docx", "xls", "xlsx", "csv", "zip",
         "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
@@ -177,10 +178,14 @@ public enum SuggestionEngine {
                 && record.fileExtension == extensionName
                 && !tokens.isDisjoint(with: meaningfulTokens(record.tokens))
         }, by: \.destinationID)
+        // The same word has to be in 3 different files you moved there ("Acme" in three Acme files),
+        // not 3 files that each share some other word with this one.
         let repeatedPatterns = examplesByDestination.compactMap { destinationID, examples -> (String, Int)? in
-            let distinctExamples = Set(examples.compactMap { $0.sampleName?.lowercased() })
-            guard distinctExamples.count >= 3 else { return nil }
-            return (destinationID, distinctExamples.count)
+            let best = tokens.map { token in
+                Set(examples.filter { meaningfulTokens($0.tokens).contains(token) }.compactMap { $0.sampleName?.lowercased() }).count
+            }.max() ?? 0
+            guard best >= 3 else { return nil }
+            return (destinationID, best)
         }
         if let learnedMatch = repeatedPatterns.max(by: { lhs, rhs in
             lhs.1 == rhs.1 ? lhs.0 > rhs.0 : lhs.1 < rhs.1

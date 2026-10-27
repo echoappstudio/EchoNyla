@@ -93,18 +93,32 @@ struct ModelTestReportView: View {
         VStack(alignment: .leading, spacing: 6) {
             SectionLabel("Test on My Files")
             Text("\(summary.right) of \(summary.files) files: Bonsai named the folder you chose.")
+            if summary.copies > 0 {
+                Caption("\(summary.copies) of those named another folder that has the same file in it, so they count as right.")
+            }
             if let accuracy = summary.sureAccuracy {
                 Text("When it was sure (\(summary.sure) files), it was right \(Int((accuracy * 100).rounded()))% of the time.")
             } else {
                 Text("It wasn't sure enough about any of them to move them by itself.")
+                if let highest = summary.highestFolderScore {
+                    Caption("Its highest folder score was \(highest)%."
+                            + (summary.unquoted > 0 ? " \(summary.unquoted) answers couldn't point to words in the folder's note." : ""))
+                }
             }
             Text(barLine)
             Caption(String(format: "About %.1f s per file. Peak memory: %@.", summary.averageSeconds,
                            ByteCountFormatter.string(fromByteCount: Int64(report.peakMemoryBytes), countStyle: .memory)))
+            if !report.mixUps.isEmpty {
+                SectionLabel("Folders it mixes up")
+                ForEach(Array(report.mixUps.enumerated()), id: \.offset) { _, mixUp in
+                    Caption("\(mixUp.0) files went to \(mixUp.1) \(mixUp.2) times")
+                }
+                Caption("Their notes may say the same thing. Give each note the words that make it different, or remove a folder you don't use.")
+            }
             if !report.misses.isEmpty {
                 SectionLabel("Where it differed from you")
                 ForEach(Array(report.misses.enumerated()), id: \.offset) { _, miss in
-                    Caption("\(miss.0): it said \(miss.1), you chose \(miss.2)")
+                    Caption(missLine(miss))
                 }
                 Caption("If its answer looks right, the file may be in the wrong folder. If not, the folder's note may need clearer words.")
             }
@@ -118,6 +132,12 @@ struct ModelTestReportView: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardSurface(radius: 10)
+    }
+
+    private func missLine(_ miss: ModelTestMiss) -> String {
+        guard let said = miss.said else { return "\(miss.file): it said none, you chose \(miss.chose)" }
+        let quote = miss.quoted ? "" : ", no words from its note"
+        return "\(miss.file): it said \(said) (\(miss.score)%\(quote)), you chose \(miss.chose)"
     }
 
     private var barLine: String {

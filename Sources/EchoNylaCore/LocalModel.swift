@@ -351,11 +351,40 @@ public enum NameQuality {
     /// True for names like "Screenshot 2026-10-27 at 9.41.02 AM", "IMG_4821", "Untitled 3",
     /// "Document (2)" or a random code: anything without two real words in it.
     public static func isUnhelpful(_ fileName: String) -> Bool {
+        realWords(fileName).count < 2
+    }
+
+    /// True when the name has no real word at all ("Screenshot 2026-10-25 at 12.33.39 AM", "IMG_4821"),
+    /// so it can't show how files are filed by what they are.
+    public static func saysNothing(_ fileName: String) -> Bool {
         let stem = (fileName as NSString).deletingPathExtension
-        let words = TextTools.words(stem).filter { word in
+        // Short words count here ("W2 2025"); dates, numbers, camera codes and default words don't.
+        return TextTools.words(stem).allSatisfy { word in
+            word.allSatisfy(\.isNumber) || generic.contains(word) || (word.count >= 4 && looksLikeCode(word))
+        }
+    }
+
+    static func realWords(_ fileName: String) -> [String] {
+        let stem = (fileName as NSString).deletingPathExtension
+        return TextTools.words(stem).filter { word in
             word.count >= 3 && !word.allSatisfy(\.isNumber) && !generic.contains(word) && !looksLikeCode(word)
         }
-        return words.count < 2
+    }
+
+    /// True for the same file name apart from a copy mark: "Report (2).pdf", "Report 2.pdf" and
+    /// "Report copy.pdf" all match "Report.pdf".
+    public static func isSameName(_ a: String, _ b: String) -> Bool {
+        withoutCopyMark(a) == withoutCopyMark(b)
+    }
+
+    static func withoutCopyMark(_ fileName: String) -> String {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        var stem = (fileName as NSString).deletingPathExtension.lowercased()
+        while let range = stem.range(of: #"(\s*\(\d{1,3}\)|\s+copy(\s+\d{1,3})?|\s+\d{1,2})$"#, options: .regularExpression),
+              range.lowerBound > stem.startIndex {
+            stem.removeSubrange(range)
+        }
+        return ext.isEmpty ? stem : stem + "." + ext
     }
 
     /// Hex strings, ids and other letter-digit jumbles ("a3f9c2", "x7k2p9q").
@@ -474,18 +503,31 @@ public struct ModelTrial: Equatable, Sendable {
     public var folderConfidence: Int
     public var quotePassed: Bool
     public var seconds: Double
+    /// Other folders that hold an exact copy of the file, so naming one of them is right too.
+    public var copyFolderIDs: Set<String>
 
-    public init(expectedFolderID: String, namedFolderID: String?, folderConfidence: Int, quotePassed: Bool, seconds: Double) {
+    public init(expectedFolderID: String, namedFolderID: String?, folderConfidence: Int, quotePassed: Bool, seconds: Double,
+                copyFolderIDs: Set<String> = []) {
         self.expectedFolderID = expectedFolderID
         self.namedFolderID = namedFolderID
         self.folderConfidence = folderConfidence
         self.quotePassed = quotePassed
         self.seconds = seconds
+        self.copyFolderIDs = copyFolderIDs
     }
 
     /// Would EchoNyla have moved it by itself at this bar?
     public func isSure(at bar: Int) -> Bool { namedFolderID != nil && quotePassed && folderConfidence >= bar }
-    public var isRight: Bool { namedFolderID == expectedFolderID }
+    public var isRight: Bool { namedFolderID == expectedFolderID || isCopyMatch }
+    /// It named another folder that has the same file in it.
+    public var isCopyMatch: Bool { namedFolderID.map { $0 != expectedFolderID && copyFolderIDs.contains($0) } ?? false }
+}
+
+/// Two folders Bonsai mixed up: files from `expectedFolderID` it put in `namedFolderID`.
+public struct FolderMixUp: Equatable, Sendable {
+    public var expectedFolderID: String
+    public var namedFolderID: String
+    public var count: Int
 }
 
 public struct ModelTestSummary: Equatable, Sendable {
@@ -498,6 +540,12 @@ public struct ModelTestSummary: Equatable, Sendable {
     public var averageSeconds: Double
     /// The folder bar that keeps sure answers right at least 95% of the time, or nil when none does.
     public var recommendedBar: Int?
+    /// Right answers that named another folder holding the same file.
+    public var copies: Int = 0
+    /// The highest folder score it gave with a folder named, and how many named folders it
+    /// couldn't quote the note of. Together they say why nothing was sure.
+    public var highestFolderScore: Int? = nil
+    public var unquoted: Int = 0
 
     public var sureAccuracy: Double? { sure == 0 ? nil : Double(sureRight) / Double(sure) }
 }
@@ -511,9 +559,26 @@ public enum ModelTest {
     public static func summarize(_ trials: [ModelTrial], bar: Int) -> ModelTestSummary {
         let sure = trials.filter { $0.isSure(at: bar) }
         let seconds = trials.isEmpty ? 0 : trials.map(\.seconds).reduce(0, +) / Double(trials.count)
+        let named = trials.filter { $0.namedFolderID != nil }
         return ModelTestSummary(files: trials.count, right: trials.filter(\.isRight).count, sure: sure.count,
                                 sureRight: sure.filter(\.isRight).count, averageSeconds: seconds,
-                                recommendedBar: recommendedBar(trials))
+                                recommendedBar: recommendedBar(trials), copies: trials.filter(\.isCopyMatch).count,
+                                highestFolderScore: named.map(\.folderConfidence).max(),
+                                unquoted: named.filter { !$0.quotePassed }.count)
+    }
+
+    /// Folder pairs it mixed up at least twice, most first: a sign the two folders' notes say the same thing.
+    public static func mixUps(_ trials: [ModelTrial]) -> [FolderMixUp] {
+        var counts: [String: FolderMixUp] = [:]
+        for trial in trials where !trial.isRight {
+            guard let named = trial.namedFolderID else { continue }
+            let key = trial.expectedFolderID + "\u{0}" + named
+            counts[key, default: FolderMixUp(expectedFolderID: trial.expectedFolderID, namedFolderID: named, count: 0)].count += 1
+        }
+        return counts.values.filter { $0.count >= 2 }.sorted {
+            $0.count != $1.count ? $0.count > $1.count
+                : ($0.expectedFolderID, $0.namedFolderID) < ($1.expectedFolderID, $1.namedFolderID)
+        }
     }
 
     /// The folder bar to use after a test: the recommended bar; 101 (always ask) when there were
