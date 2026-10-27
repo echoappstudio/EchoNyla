@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 import EchoNylaCore
@@ -8,8 +9,19 @@ struct FavoriteFolder: Codable, Equatable, Identifiable {
     var id: String
     var name: String
     var bookmarkData: Data
-    /// "What goes here". Apple Intelligence only suggests folders that have one.
+    /// "What goes here": yours, or written by Bonsai from the files in it.
     var purpose: String?
+    /// "Sort into this" (true) or "Just for dragging" (false). Nil for folders saved before 3.2.0,
+    /// where a note meant the models could file into it.
+    var sortsInto: Bool?
+    /// What Bonsai learned from the files already in the folder (word stems), and when.
+    var learnedWords: [String]?
+    var learnedAt: Date?
+    var learnedFrom: Int?
+    /// The note was written by Bonsai, so learning again may replace it. Your own notes are kept.
+    var noteByBonsai: Bool?
+
+    var isSortTarget: Bool { sortsInto ?? (Destination.cleanPurpose(purpose) != nil) }
 }
 
 /// Which on-device model judges files.
@@ -48,6 +60,38 @@ struct ModelTestReport {
     /// Your folder, the folder Bonsai named instead, and how many times.
     let mixUps: [(String, String, Int)]
     let peakMemoryBytes: UInt64
+    /// Every question and answer in plain text, for Copy Details.
+    let details: String
+}
+
+/// Test on My Files in plain text, to paste to whoever tunes EchoNyla: the folders as Bonsai sees
+/// them, then each file's answer. File names and descriptions stay on this Mac unless you paste them.
+enum ModelTestDetails {
+    static func header(folders: [FavoriteFolder]) -> String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        var lines = ["EchoNyla \(version) · Test on My Files", "Sort-into folders:"]
+        for folder in folders {
+            let learned = (folder.learnedWords ?? []).prefix(15).joined(separator: ", ")
+            lines.append("- \(folder.name): \(folder.purpose ?? "(no note)")" + (learned.isEmpty ? "" : " | learned: \(learned)"))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    static func line(file: String, chose: String, judged: LocalDecision, answer: LocalAnswer?, seconds: Double, isRight: Bool) -> String {
+        var lines = ["", "\(isRight ? "RIGHT" : "MISS") \(file) (your folder: \(chose))"]
+        if let answer {
+            lines.append("  folder: \(answer.folder) \(answer.folderConfidence)% · matched: \(judged.matchesFolder ? "yes" : "no")"
+                         + (judged.sharedWords.isEmpty ? "" : " (\(judged.sharedWords.joined(separator: ", ")))")
+                         + (answer.noteWords.isEmpty ? "" : " · note words: \(answer.noteWords)"))
+            lines.append("  what it is: \(answer.whatItIs)")
+            lines.append("  name: \(answer.name) \(answer.nameConfidence)% → \(judged.decision.proposedName ?? "unchanged")"
+                         + (judged.renameIsSure ? " (sure)" : ""))
+        } else {
+            lines.append("  folder: \(judged.namedFolderID ?? "none") · matched: \(judged.matchesFolder ? "yes" : "no")")
+        }
+        lines.append(String(format: "  %.1f s", seconds))
+        return lines.joined(separator: "\n") + "\n"
+    }
 }
 
 /// A file where Bonsai named a different folder from yours.
@@ -57,8 +101,8 @@ struct ModelTestMiss {
     let said: String?
     let chose: String
     let score: Int
-    /// It could point to words in that folder's note.
-    let quoted: Bool
+    /// What's in the file matched that folder (the safety net passed).
+    let matched: Bool
 }
 
 /// A folder you cleaned, remembered for Clean Up's button and Choose Folder's menu.
@@ -96,6 +140,8 @@ struct SetupCandidate: Identifiable {
     var note: String
     var isSelected = false
     var isDrafting = false
+    /// "Sort into this" or "Just for dragging".
+    var sortsInto = true
 }
 
 struct TrashEntry: Identifiable {
@@ -149,6 +195,23 @@ final class AppModel {
     private(set) var folderCheckFindings: [FolderCheckFinding] = []
     private(set) var modelTestProgress: String?
     private(set) var modelTestReport: ModelTestReport?
+    /// The folder Bonsai is learning from its files, and how far it got.
+    private(set) var learningFolderID: String?
+    private(set) var folderLearnProgress: String?
+
+    // Deep Reorganize.
+    private(set) var reorganizeFolders: [ReorganizeFolder] = []
+    private(set) var reorganizeSkipFolders: [ReorganizeFolder] = []
+    private(set) var reorganizeStatus: ReorganizeStatus = .idle
+    private(set) var reorganizeDone = 0
+    private(set) var reorganizeTotal = 0
+    private(set) var reorganizeCurrent: String?
+    private(set) var reorganizeTimeLeft: String?
+    private(set) var reorganizeItems: [ReorganizeItem] = []
+    private(set) var reorganizeGroups: [ReorganizeGroup] = []
+    private(set) var reorganizeDuplicates: [ReorganizeDuplicate] = []
+    /// The latest run's changes, for Undo All (kept on disk).
+    private(set) var reorganizeRun: ReorganizeRun?
 
     private(set) var watchedFolders: [FavoriteFolder] = []
     private(set) var setupCandidates: [SetupCandidate] = []
@@ -238,6 +301,8 @@ final class AppModel {
         static let recentCleanupFolders = "EchoNyla.cleanup.recentFolders.v1"
         static let modelChoice = "EchoNyla.ai.model.v1"
         static let confidenceBar = "EchoNyla.ai.bar.v1"
+        static let reorganizeFolders = "EchoNyla.reorganize.folders.v1"
+        static let reorganizeSkipFolders = "EchoNyla.reorganize.skip.v1"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -255,6 +320,18 @@ final class AppModel {
     @ObservationIgnored private var installTask: Task<Void, Never>?
     @ObservationIgnored private var folderCheckTask: Task<Void, Never>?
     @ObservationIgnored private var modelTestTask: Task<Void, Never>?
+    @ObservationIgnored private var folderLearnQueue: [String] = []
+    @ObservationIgnored private var folderLearnTask: Task<Void, Never>?
+    @ObservationIgnored private var reorganizeQueue: [URL] = []
+    @ObservationIgnored private var reorganizeTask: Task<Void, Never>?
+    @ObservationIgnored private var reorganizeScopes: [URL] = []
+    @ObservationIgnored private var reorganizeSeconds: TimeInterval = 0
+    /// Where each file of the run is now, by where it was when the run started (for duplicates).
+    @ObservationIgnored private var reorganizeLocations: [String: URL] = [:]
+    @ObservationIgnored private var reorganizeUnsaved = 0
+    /// Where a moved file started the run, by where it is now.
+    @ObservationIgnored private var reorganizeOrigins: [String: String] = [:]
+    @ObservationIgnored private var reorganizeStopped = false
     @ObservationIgnored private var watchStates: [String: FolderWatchState] = [:]
     @ObservationIgnored private var watchTimer: Timer?
     @ObservationIgnored private var watchScopes: [URL] = []
@@ -295,6 +372,9 @@ final class AppModel {
         watchedFolders = Self.decode([FavoriteFolder].self, key: Keys.watchedFolders, defaults: defaults) ?? []
         loadRecentCleanupFolders()
         confidenceBar = Self.decode(ConfidenceBar.self, key: Keys.confidenceBar, defaults: defaults) ?? .standard
+        reorganizeFolders = Self.decode([ReorganizeFolder].self, key: Keys.reorganizeFolders, defaults: defaults) ?? []
+        reorganizeSkipFolders = Self.decode([ReorganizeFolder].self, key: Keys.reorganizeSkipFolders, defaults: defaults) ?? []
+        reorganizeRun = ReorganizeRun.load()
         localPaths = installer.installed()
         localModelState = localPaths == nil ? .notInstalled : .installed
     }
@@ -308,7 +388,9 @@ final class AppModel {
     }
 
     var destinations: [Destination] {
-        favoriteFolders.map { Destination(id: $0.id, name: $0.name, purpose: $0.purpose) }
+        favoriteFolders.map {
+            Destination(id: $0.id, name: $0.name, purpose: $0.purpose, sortsInto: $0.isSortTarget, learnedWords: $0.learnedWords ?? [])
+        }
     }
 
     /// True when Apple Intelligence has at least one described folder it may choose.
@@ -411,7 +493,82 @@ final class AppModel {
     func setFolderPurpose(id: String, to text: String) {
         guard let index = favoriteFolders.firstIndex(where: { $0.id == id }) else { return }
         favoriteFolders[index].purpose = text.isEmpty ? nil : String(text.prefix(200))
+        favoriteFolders[index].noteByBonsai = false
         persist(favoriteFolders, key: Keys.folders)
+    }
+
+    /// "Sort into this" or "Just for dragging". A new Sort-into folder is learned from its files right away.
+    func setFolderSortsInto(id: String, _ sortsInto: Bool) {
+        guard let index = favoriteFolders.firstIndex(where: { $0.id == id }) else { return }
+        favoriteFolders[index].sortsInto = sortsInto
+        persist(favoriteFolders, key: Keys.folders)
+        if sortsInto, favoriteFolders[index].learnedAt == nil, usesLocalModel { learnFolder(id: id) }
+    }
+
+    // MARK: Learning a folder from its files
+
+    /// Bonsai looks at up to 12 files already in the folder and writes down what they are: words it
+    /// matches new files against, and a note (unless you wrote your own).
+    func learnFolder(id: String) {
+        guard usesLocalModel, !folderLearnQueue.contains(id), learningFolderID != id else { return }
+        folderLearnQueue.append(id)
+        guard folderLearnTask == nil else { return }
+        folderLearnTask = Task {
+            while !folderLearnQueue.isEmpty {
+                let next = folderLearnQueue.removeFirst()
+                learningFolderID = next
+                await learn(folderID: next)
+            }
+            learningFolderID = nil
+            folderLearnProgress = nil
+            folderLearnTask = nil
+        }
+    }
+
+    func cancelFolderLearning() {
+        folderLearnQueue = []
+        folderLearnTask?.cancel()
+        folderLearnTask = nil
+        learningFolderID = nil
+        folderLearnProgress = nil
+    }
+
+    private func learn(folderID id: String) async {
+        guard let folder = favoriteFolders.first(where: { $0.id == id }), let url = resolvedURL(for: id), let paths = localPaths else { return }
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        let files = looseFiles(in: url, limit: FolderProfile.sampleSize)
+        guard !files.isEmpty else {
+            statusMessage = "\(folder.name) has no files for Bonsai to learn from yet."
+            return
+        }
+        var descriptions: [String] = []
+        var samples: [String] = []
+        for (number, file) in files.enumerated() {
+            if Task.isCancelled { return }
+            folderLearnProgress = "Learning \(folder.name): \(number + 1) of \(files.count)…"
+            let facts = await FileInspector.facts(for: file, readContents: readContents)
+            let picture = await FileInspector.picture(for: file, readContents: readContents)
+            let question = LocalQuestion(facts: facts, picture: picture, destinations: [], locked: [])
+            guard let result = try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar) else { continue }
+            descriptions.append(result.answer.whatItIs)
+            samples.append(result.answer.whatItIs + " " + result.answer.name)
+        }
+        guard !Task.isCancelled, !descriptions.isEmpty else { return }
+        folderLearnProgress = "Writing a note for \(folder.name)…"
+        let prompt = FolderProfile.notePrompt(folderName: folder.name, descriptions: descriptions)
+        let reply = try? await LlamaEngine.shared.generate(paths: paths, prompt: prompt, image: nil, grammar: FolderProfile.noteGrammar)
+        guard let index = favoriteFolders.firstIndex(where: { $0.id == id }) else { return }
+        favoriteFolders[index].learnedWords = FolderProfile.words(samples: samples)
+        favoriteFolders[index].learnedAt = Date()
+        favoriteFolders[index].learnedFrom = descriptions.count
+        let ownNote = favoriteFolders[index].noteByBonsai != true && Destination.cleanPurpose(favoriteFolders[index].purpose) != nil
+        if !ownNote, let note = reply.flatMap({ FolderProfile.parseNote($0.text) }) {
+            favoriteFolders[index].purpose = note
+            favoriteFolders[index].noteByBonsai = true
+        }
+        persist(favoriteFolders, key: Keys.folders)
+        statusMessage = "Bonsai learned \(folder.name) from \(descriptions.count) file\(descriptions.count == 1 ? "" : "s")."
     }
 
     func removeFavorite(id: String) {
@@ -742,7 +899,7 @@ final class AppModel {
         }
         let facts = await FileInspector.facts(for: url, readContents: readContents)
         let judged = await judge(url, facts: facts)
-        let backed = facts.hasContentEvidence || judged?.quotePassed == true
+        let backed = facts.hasContentEvidence || judged?.matchesFolder == true
         let decision = AutoMovePolicy.decide(fileName: fileName, local: local, ai: judged?.decision, aiHadContentEvidence: backed,
                                              autoMoveEnabled: autoMove, locked: locked)
         return Evaluation(decision: decision, ai: judged?.decision, renameIsSure: judged?.renameIsSure == true)
@@ -753,6 +910,12 @@ final class AppModel {
     /// Bonsai also looks at a picture of the file. `currentFolderName` is for Check This Folder.
     /// `testing` leaves the file's own past move out of the examples, so Test on My Files can't peek at the answer.
     private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil, testing: Bool = false) async -> LocalDecision? {
+        await judgeWithAnswer(url, facts: facts, currentFolderName: currentFolderName, testing: testing)?.decision
+    }
+
+    /// `judge`, plus Bonsai's raw answer (for Test on My Files' details).
+    private func judgeWithAnswer(_ url: URL, facts: FileFacts, currentFolderName: String? = nil,
+                                 testing: Bool = false) async -> (decision: LocalDecision, answer: LocalAnswer?)? {
         guard aiReady else { return nil }
         let locked = lockedDestinationIDs
         if usesLocalModel, let paths = localPaths {
@@ -762,18 +925,25 @@ final class AppModel {
             let question = LocalQuestion(facts: facts, picture: picture, destinations: destinations, locked: locked,
                                          currentFolderName: currentFolderName, examples: examples,
                                          captured: FileInspector.creationDate(of: url))
-            return try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar).decision
+            guard let result = try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar) else { return nil }
+            return (result.decision, result.answer)
         }
         let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked,
                                                leavingOut: testing ? url.lastPathComponent : nil)
         let prompt = DecisionPrompt.make(facts: facts, destinations: destinations, locked: locked, examples: examples)
         guard let answer = try? await OnDeviceModel.decide(prompt) else { return nil }
-        let decision = DecisionCheck.check(folder: answer.folder, confidence: answer.confidence, reason: answer.reason,
+        var decision = DecisionCheck.check(folder: answer.folder, confidence: answer.confidence, reason: answer.reason,
                                            betterName: answer.betterName, summary: answer.summary, fileName: facts.fileName,
                                            destinations: destinations, locked: locked)
+        // The same safety net as Bonsai's: a sure answer must also match the folder better than any other.
+        let named = decision.destinationID.flatMap { id in destinations.first { $0.id == id } }
+        let words = FolderMatch.fileWords(evidence: Evidence(facts: facts, description: decision.summary), title: answer.betterName)
+        let match = named.map { FolderMatch.check(named: $0, among: AIFolders.choosable(destinations, locked: locked), fileWords: words) }
+        if match?.passes != true { decision.isConfident = false }
         // Apple Intelligence's names always wait for you.
-        return LocalDecision(decision: decision, namedFolderID: decision.destinationID, folderConfidence: decision.isConfident ? 100 : 0,
-                             quotePassed: decision.destinationID != nil, renameIsSure: false)
+        let checked = LocalDecision(decision: decision, namedFolderID: decision.destinationID, folderConfidence: decision.isConfident ? 100 : 0,
+                                    matchesFolder: match?.passes ?? false, renameIsSure: false, sharedWords: match?.shared ?? [])
+        return (checked, nil)
     }
 
     /// "What is this file?" for any file.
@@ -1176,12 +1346,14 @@ final class AppModel {
         var trials: [ModelTrial] = []
         var renames: [(String, String)] = []
         var misses: [ModelTestMiss] = []
+        var details = ModelTestDetails.header(folders: described)
         for (number, item) in cases.enumerated() {
             if Task.isCancelled { break }
             modelTestProgress = "Testing on your files: \(number + 1) of \(cases.count)…"
             let started = Date()
             let facts = await FileInspector.facts(for: item.url, readContents: readContents)
-            guard let judged = await judge(item.url, facts: facts, testing: true) else { continue }
+            guard let result = await judgeWithAnswer(item.url, facts: facts, testing: true) else { continue }
+            let judged = result.decision
             let seconds = Date().timeIntervalSince(started)
             // The same file can sit in two of your folders; naming either one is right.
             var copies: Set<String> = []
@@ -1190,14 +1362,16 @@ final class AppModel {
                 copies.insert(named)
             }
             let trial = ModelTrial(expectedFolderID: item.folderID, namedFolderID: judged.namedFolderID,
-                                   folderConfidence: judged.folderConfidence, quotePassed: judged.quotePassed,
+                                   folderConfidence: judged.folderConfidence, matchesFolder: judged.matchesFolder,
                                    seconds: seconds, copyFolderIDs: copies)
             trials.append(trial)
+            details += ModelTestDetails.line(file: item.url.lastPathComponent, chose: destinationName(for: item.folderID) ?? "?",
+                                             judged: judged, answer: result.answer, seconds: seconds, isRight: trial.isRight)
             if !trial.isRight, misses.count < 8 {
                 misses.append(ModelTestMiss(file: item.url.lastPathComponent,
                                             said: judged.namedFolderID.flatMap { destinationName(for: $0) },
                                             chose: destinationName(for: item.folderID) ?? "?",
-                                            score: judged.folderConfidence, quoted: judged.quotePassed))
+                                            score: judged.folderConfidence, matched: judged.matchesFolder))
             }
             if renames.count < 6, NameQuality.isUnhelpful(item.url.lastPathComponent), let name = judged.decision.proposedName {
                 renames.append((item.url.lastPathComponent, name))
@@ -1206,7 +1380,7 @@ final class AppModel {
         modelTestProgress = nil
         modelTestTask = nil
         guard !Task.isCancelled, !trials.isEmpty else {
-            if trials.isEmpty { userError = "Test on My Files needs files you've moved yourself, or files in folders with a note." }
+            if trials.isEmpty { userError = "Test on My Files needs files you've moved yourself, or files in Sort-into folders." }
             return
         }
         let before = confidenceBar.folder
@@ -1219,7 +1393,7 @@ final class AppModel {
         }
         modelTestReport = ModelTestReport(summary: ModelTest.summarize(trials, bar: confidenceBar.folder), barBefore: before,
                                           barAfter: confidenceBar.folder, renames: renames, misses: misses, mixUps: Array(mixUps),
-                                          peakMemoryBytes: LlamaEngine.peakMemory())
+                                          peakMemoryBytes: LlamaEngine.peakMemory(), details: details)
     }
 
     /// True when `folder` holds a byte-for-byte copy of `file` (under any name).
@@ -1233,6 +1407,418 @@ final class AppModel {
                   values.isRegularFile == true, values.fileSize == size else { return false }
             return fileManager.contentsEqual(atPath: file.path, andPath: other.path)
         }
+    }
+
+    // MARK: Deep Reorganize
+
+    /// Adds a folder to go through, or (with `skip`) one Deep Reorganize must never touch.
+    func addReorganizeFolder(skip: Bool) {
+        let title = skip ? "Choose a folder Deep Reorganize must leave alone" : "Choose a folder for Deep Reorganize"
+        guard let url = chooseFolder(title: title, prompt: skip ? "Leave Alone" : "Add Folder") else { return }
+        addReorganizeFolder(url, skip: skip)
+    }
+
+    func addReorganizeFolder(_ url: URL, skip: Bool) {
+        guard let bookmark = makeBookmark(url) else {
+            userError = "Could not save that folder."
+            return
+        }
+        let folder = ReorganizeFolder(path: url.standardizedFileURL.path, bookmarkData: bookmark)
+        if skip {
+            guard !reorganizeSkipFolders.contains(where: { $0.path == folder.path }) else { return }
+            reorganizeSkipFolders.append(folder)
+            persist(reorganizeSkipFolders, key: Keys.reorganizeSkipFolders)
+        } else {
+            guard !reorganizeFolders.contains(where: { $0.path == folder.path }) else { return }
+            reorganizeFolders.append(folder)
+            persist(reorganizeFolders, key: Keys.reorganizeFolders)
+        }
+    }
+
+    func removeReorganizeFolder(path: String, skip: Bool) {
+        if skip {
+            reorganizeSkipFolders.removeAll { $0.path == path }
+            persist(reorganizeSkipFolders, key: Keys.reorganizeSkipFolders)
+        } else {
+            reorganizeFolders.removeAll { $0.path == path }
+            persist(reorganizeFolders, key: Keys.reorganizeFolders)
+        }
+    }
+
+    var isReorganizing: Bool { reorganizeStatus == .running || reorganizeStatus == .paused }
+
+    /// Goes through every file in the chosen folders (and the folders inside them), except the ones
+    /// to leave alone and your Sort-into folders. Sure files are renamed and moved by themselves;
+    /// the rest wait on the Reorganize page. Everything can be put back with Undo All.
+    func startReorganize() {
+        guard usesLocalModel, !isReorganizing else { return }
+        guard !reorganizeFolders.isEmpty else {
+            userError = "Add a folder for Deep Reorganize to go through first."
+            return
+        }
+        for url in reorganizeScopes { url.stopAccessingSecurityScopedResource() }
+        reorganizeScopes = []
+        func startAccess(_ folder: ReorganizeFolder) -> URL {
+            let url = resolveBookmark(folder.bookmarkData).url ?? URL(fileURLWithPath: folder.path, isDirectory: true)
+            if url.startAccessingSecurityScopedResource() { reorganizeScopes.append(url) }
+            return url
+        }
+        let sources = reorganizeFolders.map(startAccess)
+        let skips = reorganizeSkipFolders.map(startAccess).map { $0.standardizedFileURL.path }
+        // Sort-into folders are where files go, so the files already in them are left alone.
+        let targets = favoriteFolders.filter(\.isSortTarget).compactMap { resolve($0)?.standardizedFileURL.path }
+        reorganizeItems = []
+        reorganizeGroups = []
+        reorganizeDuplicates = []
+        reorganizeDone = 0
+        reorganizeTotal = 0
+        reorganizeSeconds = 0
+        reorganizeTimeLeft = nil
+        reorganizeStopped = false
+        reorganizeCurrent = "Looking through the folders…"
+        reorganizeStatus = .running
+        reorganizeRun = ReorganizeRun()
+        saveReorganizeRun()
+        reorganizeTask = Task {
+            let files = await Task.detached(priority: .utility) {
+                Self.reorganizeFiles(sources: sources, skip: skips, targets: targets)
+            }.value
+            reorganizeQueue = reorganizeStopped ? [] : files
+            reorganizeTotal = reorganizeQueue.count
+            reorganizeLocations = Dictionary(files.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+            reorganizeOrigins = [:]
+            await runReorganizeQueue()
+        }
+    }
+
+    func pauseReorganize() {
+        guard reorganizeStatus == .running else { return }
+        reorganizeStatus = .paused
+        reorganizeCurrent = "Pausing after this file…"
+    }
+
+    func resumeReorganize() {
+        guard reorganizeStatus == .paused else { return }
+        reorganizeStatus = .running
+        if reorganizeTask == nil { reorganizeTask = Task { await runReorganizeQueue() } }
+    }
+
+    /// Stops going through files; what's done stays done, and the rest of the page fills in.
+    func stopReorganize() {
+        guard isReorganizing else { return }
+        reorganizeStopped = true
+        reorganizeQueue = []
+        if reorganizeStatus == .paused, reorganizeTask == nil {
+            reorganizeStatus = .running
+            reorganizeTask = Task { await runReorganizeQueue() }
+        } else {
+            reorganizeStatus = .running
+        }
+    }
+
+    private func runReorganizeQueue() async {
+        while reorganizeStatus == .running, !reorganizeQueue.isEmpty {
+            let file = reorganizeQueue.removeFirst()
+            reorganizeCurrent = file.lastPathComponent
+            let started = Date()
+            if fileManager.fileExists(atPath: file.path) { await reorganize(file) }
+            reorganizeSeconds += Date().timeIntervalSince(started)
+            reorganizeDone += 1
+            reorganizeTimeLeft = ReorganizeTime.remaining(done: reorganizeDone, total: reorganizeTotal, elapsed: reorganizeSeconds)
+        }
+        saveReorganizeRun()
+        if reorganizeStatus == .paused {
+            reorganizeCurrent = nil
+            reorganizeTask = nil
+            return
+        }
+        await finishReorganize()
+        reorganizeTask = nil
+    }
+
+    /// One file: moved and renamed when sure, renamed when only the name is sure, otherwise left for you.
+    private func reorganize(_ file: URL) async {
+        let facts = await FileInspector.facts(for: file, readContents: readContents)
+        guard let judged = await judge(file, facts: facts) else {
+            reorganizeItems.append(ReorganizeItem(url: file, summary: "", reason: "\(modelName) couldn't read this file.", groupText: ""))
+            return
+        }
+        let decision = judged.decision
+        var current = file
+        if autoMove, decision.isConfident, let id = decision.destinationID, let folder = resolvedURL(for: id),
+           let moved = reorganizeMove(current, into: folder) {
+            current = moved
+            if judged.renameIsSure, let name = decision.proposedName { _ = reorganizeRename(current, to: name) }
+            return
+        }
+        var renamed = false
+        if judged.renameIsSure, let name = decision.proposedName, let newURL = reorganizeRename(current, to: name) {
+            current = newURL
+            renamed = true
+        }
+        let sure = autoMove == false && decision.isConfident
+        reorganizeItems.append(ReorganizeItem(url: current, destinationID: decision.destinationID,
+                                              proposedName: renamed ? nil : decision.proposedName, summary: decision.summary,
+                                              reason: decision.reason, moveSelected: sure && decision.destinationID != nil,
+                                              groupText: [decision.summary, decision.proposedName ?? ""].joined(separator: " ")))
+    }
+
+    private func reorganizeMove(_ file: URL, into folder: URL) -> URL? {
+        guard let receipt = try? move(file, into: folder) else { return nil }
+        recordReorganize(receipt, renamed: false)
+        return receipt.movedURL
+    }
+
+    private func reorganizeRename(_ file: URL, to name: String) -> URL? {
+        guard let receipt = try? withAccess(to: file.deletingLastPathComponent(), { try mover.rename(file, to: name) }) else { return nil }
+        recordReorganize(receipt, renamed: true)
+        return receipt.movedURL
+    }
+
+    private func recordReorganize(_ receipt: FileMoveReceipt, renamed: Bool) {
+        handledPaths.insert(receipt.movedURL.path)
+        appMovedPaths.insert(receipt.originalURL.path)
+        let origin = reorganizeOrigins[receipt.originalURL.path] ?? receipt.originalURL.path
+        if reorganizeLocations[origin] != nil { reorganizeLocations[origin] = receipt.movedURL }
+        reorganizeOrigins[receipt.movedURL.path] = origin
+        if reorganizeRun == nil || reorganizeRun?.isUndone == true { reorganizeRun = ReorganizeRun() }
+        reorganizeRun?.changes.append(receipt)
+        if renamed { reorganizeRun?.renamed += 1 } else { reorganizeRun?.moved += 1 }
+        reorganizeUnsaved += 1
+        if reorganizeUnsaved >= 20 { saveReorganizeRun() }
+    }
+
+    private func saveReorganizeRun() {
+        reorganizeRun?.save()
+        reorganizeUnsaved = 0
+    }
+
+    /// After the last file: suggested new folders for files about the same thing, and exact duplicates.
+    private func finishReorganize() async {
+        reorganizeCurrent = "Looking for duplicates and new folders…"
+        let unplaced = reorganizeItems.filter { $0.destinationID == nil && !$0.groupText.isEmpty }
+        let groups = ContentGrouping.groups(unplaced.map { (id: $0.id, text: $0.groupText) }, minimumSize: max(3, minimumRelatedFileCount),
+                                            existingNames: favoriteFolders.map(\.name))
+        reorganizeGroups = groups.map { group in
+            let members = unplaced.filter { group.ids.contains($0.id) }
+            return ReorganizeGroup(id: group.name.lowercased(), name: group.name, files: members.map(\.url),
+                                   learnedWords: FolderProfile.words(samples: members.map(\.groupText)))
+        }
+        let locations = Array(reorganizeLocations.values)
+        let found = await Task.detached(priority: .utility) { Self.duplicates(among: locations) }.value
+        reorganizeDuplicates = found.map { ReorganizeDuplicate(keep: $0.keep, copies: $0.copies) }
+        reorganizeCurrent = nil
+        reorganizeTimeLeft = nil
+        reorganizeStatus = .finished
+        saveReorganizeRun()
+        let run = reorganizeRun
+        statusMessage = "Deep Reorganize: moved \(run?.moved ?? 0), renamed \(run?.renamed ?? 0); \(reorganizeItems.count) waiting for you."
+    }
+
+    func setReorganizeMove(_ id: String, _ selected: Bool) {
+        guard let index = reorganizeItems.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeItems[index].moveSelected = selected && reorganizeItems[index].destinationID != nil
+    }
+
+    func setReorganizeRename(_ id: String, _ selected: Bool) {
+        guard let index = reorganizeItems.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeItems[index].renameSelected = selected && reorganizeItems[index].proposedName != nil
+    }
+
+    func setReorganizeDestination(_ id: String, _ destinationID: String) {
+        guard let index = reorganizeItems.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeItems[index].destinationID = destinationID.isEmpty ? nil : destinationID
+        reorganizeItems[index].moveSelected = !destinationID.isEmpty
+    }
+
+    func setReorganizeGroup(_ id: String, selected: Bool) {
+        guard let index = reorganizeGroups.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeGroups[index].isSelected = selected
+    }
+
+    func renameReorganizeGroup(_ id: String, to name: String) {
+        guard let index = reorganizeGroups.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeGroups[index].name = name
+    }
+
+    func setReorganizeGroupFavorite(_ id: String, _ makeFavorite: Bool) {
+        guard let index = reorganizeGroups.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeGroups[index].makeFavorite = makeFavorite
+    }
+
+    func setReorganizeDuplicate(_ id: String, selected: Bool) {
+        guard let index = reorganizeDuplicates.firstIndex(where: { $0.id == id }) else { return }
+        reorganizeDuplicates[index].isSelected = selected
+    }
+
+    var reorganizeChosenCount: Int {
+        reorganizeItems.filter { ($0.moveSelected && $0.destinationID != nil) || ($0.renameSelected && $0.proposedName != nil) }.count
+            + reorganizeGroups.filter(\.isSelected).count + reorganizeDuplicates.filter(\.isSelected).count
+    }
+
+    /// Applies what you checked on the Reorganize page. It joins the run, so Undo All covers it too.
+    func applyReorganizeChoices() {
+        guard !isReorganizing else { return }
+        var moved = 0
+        var renamed = 0
+        var done: Set<String> = []
+        for item in reorganizeItems where item.moveSelected || item.renameSelected {
+            var current = item.url
+            if item.renameSelected, let name = item.proposedName, let newURL = reorganizeRename(current, to: name) {
+                current = newURL
+                renamed += 1
+            }
+            if item.moveSelected, let id = item.destinationID, let folder = resolvedURL(for: id),
+               let newURL = reorganizeMove(current, into: folder) {
+                moved += 1
+                remember(fileName: newURL.lastPathComponent, destinationID: id)
+            }
+            done.insert(item.id)
+        }
+        reorganizeItems.removeAll { done.contains($0.id) }
+
+        var newFavorites: [String] = []
+        for group in reorganizeGroups where group.isSelected {
+            guard let name = validFolderName(group.name) else {
+                userError = "Enter a valid name for the \(group.name) folder."
+                continue
+            }
+            let files = group.files.filter { fileManager.fileExists(atPath: $0.path) }
+            guard let parent = Self.mostCommonParent(files) else { continue }
+            do {
+                let (folder, created) = try withAccess(to: parent) { try createOrFindFolder(named: name, in: parent) }
+                if created { reorganizeRun?.createdFolders.append(folder) }
+                for file in files where reorganizeMove(file, into: folder) != nil { moved += 1 }
+                if group.makeFavorite, let bookmark = makeBookmark(folder),
+                   !favoriteFolders.contains(where: { resolve($0)?.standardizedFileURL == folder.standardizedFileURL }) {
+                    let favorite = FavoriteFolder(id: UUID().uuidString, name: folder.lastPathComponent, bookmarkData: bookmark,
+                                                  sortsInto: true, learnedWords: group.learnedWords)
+                    favoriteFolders.append(favorite)
+                    reorganizeRun?.addedFavoriteIDs.append(favorite.id)
+                    newFavorites.append(favorite.id)
+                }
+            } catch {
+                userError = "Could not make the \(name) folder: \(error.localizedDescription)"
+            }
+            let paths = Set(group.files.map(\.path))
+            reorganizeItems.removeAll { paths.contains($0.id) }
+        }
+        reorganizeGroups.removeAll(where: \.isSelected)
+        persist(favoriteFolders, key: Keys.folders)
+
+        let base = reorganizeFolders.first.flatMap { resolveBookmark($0.bookmarkData).url }
+        for duplicate in reorganizeDuplicates where duplicate.isSelected {
+            guard let base else { break }
+            do {
+                let (folder, created) = try withAccess(to: base) { try createOrFindFolder(named: "Duplicates", in: base) }
+                if created { reorganizeRun?.createdFolders.append(folder) }
+                for copy in duplicate.copies where fileManager.fileExists(atPath: copy.path) && reorganizeMove(copy, into: folder) != nil {
+                    moved += 1
+                }
+            } catch {
+                userError = "Could not make the Duplicates folder: \(error.localizedDescription)"
+            }
+        }
+        reorganizeDuplicates.removeAll(where: \.isSelected)
+        saveReorganizeRun()
+        if usesLocalModel { for id in newFavorites { learnFolder(id: id) } }
+        statusMessage = "Moved \(moved), renamed \(renamed). Undo All puts the whole run back."
+    }
+
+    /// Puts back every move and rename of the latest run, newest first. Folders it made go if
+    /// they're empty, and favorites it added are removed.
+    func undoReorganizeRun() {
+        guard var run = reorganizeRun, run.hasChanges, !isReorganizing else { return }
+        var undone = 0
+        var failed = 0
+        for receipt in run.changes.reversed() {
+            do {
+                try mover.undo(receipt)
+                handledPaths.insert(receipt.originalURL.path)
+                undone += 1
+            } catch {
+                failed += 1
+            }
+        }
+        for folder in run.createdFolders.reversed() { removeFolderIfEmpty(folder) }
+        let added = Set(run.addedFavoriteIDs)
+        if !added.isEmpty {
+            favoriteFolders.removeAll { added.contains($0.id) }
+            persist(favoriteFolders, key: Keys.folders)
+        }
+        run.isUndone = true
+        run.save()
+        reorganizeRun = run
+        reorganizeItems = []
+        reorganizeGroups = []
+        reorganizeDuplicates = []
+        reorganizeStatus = .idle
+        statusMessage = failed == 0 ? "Put back \(undone) changes."
+            : "Put back \(undone) changes. \(failed) couldn't be put back: those files had been moved or replaced since."
+    }
+
+    /// Every file under `sources`, leaving out folders to skip, Sort-into folders (`targets`) inside
+    /// them, hidden files, app bundles, partial downloads and installers. At most `ReorganizeScope.fileLimit`.
+    nonisolated private static func reorganizeFiles(sources: [URL], skip: [String], targets: [String]) -> [URL] {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey]
+        var result: [URL] = []
+        var seen: Set<String> = []
+        for source in sources {
+            let sourcePath = source.standardizedFileURL.path
+            guard !ReorganizeScope.isInside(sourcePath, any: skip),
+                  let walker = FileManager.default.enumerator(at: source, includingPropertiesForKeys: keys,
+                                                              options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+            while let url = walker.nextObject() as? URL {
+                let path = url.standardizedFileURL.path
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                if values?.isDirectory == true {
+                    if ReorganizeScope.isInside(path, any: skip) || (path != sourcePath && targets.contains(path)) { walker.skipDescendants() }
+                    continue
+                }
+                guard values?.isRegularFile == true, !AutoMovePolicy.isIgnored(fileName: url.lastPathComponent),
+                      seen.insert(path).inserted else { continue }
+                result.append(url.standardizedFileURL)
+                if result.count >= ReorganizeScope.fileLimit { return result }
+            }
+        }
+        return result
+    }
+
+    nonisolated private static func mostCommonParent(_ files: [URL]) -> URL? {
+        let parents = Dictionary(grouping: files) { $0.deletingLastPathComponent().standardizedFileURL }
+        return parents.max { $0.value.count != $1.value.count ? $0.value.count < $1.value.count : $0.key.path > $1.key.path }?.key
+    }
+
+    /// Exact duplicates among `files`: same size first, then the same SHA-256 of the contents.
+    nonisolated private static func duplicates(among files: [URL]) -> [(keep: URL, copies: [URL])] {
+        var sized: [(path: String, size: Int64)] = []
+        var modified: [String: Date] = [:]
+        for url in files {
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]),
+                  values.isRegularFile == true, let size = values.fileSize else { continue }
+            sized.append((path: url.path, size: Int64(size)))
+            modified[url.path] = values.contentModificationDate
+        }
+        var prints: [(path: String, fingerprint: String)] = []
+        for group in DuplicateFinder.sameSize(sized) {
+            for path in group {
+                if let print = fingerprint(path) { prints.append((path: path, fingerprint: print)) }
+            }
+        }
+        return DuplicateFinder.groups(prints).compactMap { paths in
+            guard let keep = DuplicateFinder.keeper(paths, modified: modified) else { return nil }
+            return (keep: URL(fileURLWithPath: keep), copies: paths.filter { $0 != keep }.map { URL(fileURLWithPath: $0) })
+        }
+    }
+
+    nonisolated private static func fingerprint(_ path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: Clean up a folder
@@ -1651,12 +2237,14 @@ final class AppModel {
         }
         let existing = Set(favoriteFolders.compactMap { resolve($0)?.standardizedFileURL.path })
         let ranked = SetupSuggestions.rank(folders, existing: existing)
+        // With Bonsai, notes come from learning each folder's files after it's added.
+        let drafts = aiReady && !usesLocalModel
         setupCandidates = ranked.map { folder in
             SetupCandidate(url: URL(fileURLWithPath: folder.path, isDirectory: true), fileCount: counts[folder.path] ?? folder.fileCount,
-                           note: "", isDrafting: aiReady)
+                           note: "", isDrafting: drafts)
         }
         isPreparingSetup = false
-        guard aiReady else { return }
+        guard drafts else { return }
         Task { await draftSetupNotes() }
     }
 
@@ -1678,6 +2266,11 @@ final class AppModel {
         setupCandidates[index].isSelected = selected
     }
 
+    func setSetupSortsInto(id: String, _ sortsInto: Bool) {
+        guard let index = setupCandidates.firstIndex(where: { $0.id == id }) else { return }
+        setupCandidates[index].sortsInto = sortsInto
+    }
+
     func setSetupNote(id: String, to note: String) {
         guard let index = setupCandidates.firstIndex(where: { $0.id == id }) else { return }
         setupCandidates[index].note = note
@@ -1687,14 +2280,19 @@ final class AppModel {
     /// Adds the ticked folders as favorites with their notes.
     func addChosenSetupFolders() {
         var added = 0
+        var toLearn: [String] = []
         for candidate in setupCandidates where candidate.isSelected {
             guard let bookmark = makeBookmark(candidate.url),
                   !favoriteFolders.contains(where: { resolve($0)?.standardizedFileURL == candidate.url.standardizedFileURL }) else { continue }
             let note = Destination.cleanPurpose(candidate.note)
-            favoriteFolders.append(FavoriteFolder(id: UUID().uuidString, name: candidate.url.lastPathComponent, bookmarkData: bookmark, purpose: note))
+            let folder = FavoriteFolder(id: UUID().uuidString, name: candidate.url.lastPathComponent, bookmarkData: bookmark, purpose: note,
+                                        sortsInto: candidate.sortsInto)
+            favoriteFolders.append(folder)
+            if candidate.sortsInto { toLearn.append(folder.id) }
             added += 1
         }
         persist(favoriteFolders, key: Keys.folders)
+        if usesLocalModel { for id in toLearn { learnFolder(id: id) } }
         setupCandidates = []
         isSetupOpen = false
         statusMessage = added == 0 ? nil : "Added \(added) favorite folder\(added == 1 ? "" : "s")."

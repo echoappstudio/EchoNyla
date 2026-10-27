@@ -22,10 +22,19 @@ public struct FileDecision: Equatable, Sendable {
 
 /// Which of your folders Apple Intelligence may choose.
 public enum AIFolders {
-    /// Folders you described ("What goes here") that no rule reserves. Folders without a note are
-    /// only for drag and drop, your rules and your own moves.
+    /// "Sort into this" folders that no rule reserves and that the model knows something about (a
+    /// note or learned words). "Just for dragging" folders only get files from drag and drop, your
+    /// rules and your own moves.
     public static func choosable(_ destinations: [Destination], locked: Set<String>) -> [Destination] {
-        destinations.filter { !locked.contains($0.id) && Destination.cleanPurpose($0.purpose) != nil }
+        destinations.filter { folder in
+            !locked.contains(folder.id) && folder.sortsInto
+                && (Destination.cleanPurpose(folder.purpose) != nil || !folder.learnedWords.isEmpty)
+        }
+    }
+
+    /// "- Bills: Utility bills and invoices" for the folder list in a prompt.
+    public static func line(_ folder: Destination) -> String {
+        "- \(folder.name): \(Destination.cleanPurpose(folder.purpose) ?? "(no note)")"
     }
 }
 
@@ -201,7 +210,7 @@ public enum DecisionPrompt {
             lines.append("There are no folders to choose from. Answer none for the folder.")
         } else {
             lines.append("Folders you may choose (exact name: what goes there):")
-            lines += allowed.map { "- \($0.name): \(Destination.cleanPurpose($0.purpose) ?? "")" }
+            lines += allowed.map(AIFolders.line)
             if !examples.isEmpty {
                 lines.append("How this person filed files before:")
                 lines += examples.map { "- " + $0 }

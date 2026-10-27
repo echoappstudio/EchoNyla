@@ -3,13 +3,30 @@ import Foundation
 public struct Destination: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var name: String
-    /// Your note on what goes in this folder. Apple Intelligence may only choose folders that have one.
+    /// The note on what goes in this folder (yours, or written by Bonsai from the files in it).
     public var purpose: String?
+    /// "Sort into this": the models may file things here. Off means "Just for dragging".
+    public var sortsInto: Bool
+    /// Stems of the words Bonsai learned from the files already in the folder.
+    public var learnedWords: [String]
 
-    public init(id: String, name: String, purpose: String? = nil) {
+    /// `sortsInto` defaults to whether the folder has a note, as it worked before 3.2.0.
+    public init(id: String, name: String, purpose: String? = nil, sortsInto: Bool? = nil, learnedWords: [String] = []) {
         self.id = id
         self.name = name
         self.purpose = Self.cleanPurpose(purpose)
+        self.sortsInto = sortsInto ?? (Self.cleanPurpose(purpose) != nil)
+        self.learnedWords = learnedWords
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, purpose, sortsInto, learnedWords }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let purpose = try container.decodeIfPresent(String.self, forKey: .purpose)
+        self.init(id: try container.decode(String.self, forKey: .id), name: try container.decode(String.self, forKey: .name),
+                  purpose: purpose, sortsInto: try container.decodeIfPresent(Bool.self, forKey: .sortsInto),
+                  learnedWords: try container.decodeIfPresent([String].self, forKey: .learnedWords) ?? [])
     }
 
     /// One line, at most 200 characters; nil when empty.

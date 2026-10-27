@@ -44,12 +44,13 @@ struct MainWindowView: View {
         }
     }
 
-    /// The five pages. There is no toolbar or inspector, so the window never changes shape between pages.
+    /// The six pages. There is no toolbar or inspector, so the window never changes shape between pages.
     @ViewBuilder
     private var detail: some View {
         switch model.selectedTab {
         case .activity: ActivityTab()
         case .cleanup: CleanUpTab()
+        case .reorganize: ReorganizeTab()
         case .find: FindTab()
         case .folders: FoldersTab()
         case .settings: SettingsTab()
@@ -215,7 +216,7 @@ struct BrandMark: View {
 
 struct SidebarRow: View {
     let tab: MainTab
-    /// ⌘1 to ⌘5.
+    /// ⌘1 to ⌘6.
     let number: Int
     let isSelected: Bool
     let badge: Int?
@@ -455,7 +456,7 @@ struct CleanUpTab: View {
                 }
             }
             if model.aiReady, !model.hasDescribedFolders, !model.favoriteFolders.isEmpty {
-                Caption("Apple Intelligence won't suggest any of your folders until you add a note saying what goes in one (Folders & Rules). It still offers clearer names.")
+                Caption("\(model.modelName) won't suggest any of your folders until one is set to Sort into this, with a note or learned from its files (Folders & Rules). It still offers clearer names.")
             }
             if model.cleanupFolder == nil {
                 ContentUnavailableView("Choose a folder to clean up", systemImage: "sparkles.rectangle.stack",
@@ -794,43 +795,24 @@ struct FoldersTab: View {
     @State private var editorRule: RuleDraft?
 
     var body: some View {
-        Page(title: "Folders & Rules", subtitle: "Where files can go, and rules that always win. The model only suggests folders you describe.") {
+        Page(title: "Folders & Rules", subtitle: "Where files can go, and rules that always win. Only Sort-into folders get files from the model.") {
             GroupBox("Favorite folders") {
                 VStack(alignment: .leading, spacing: 10) {
                     if model.favoriteFolders.isEmpty {
-                        Caption("No favorites yet. Add the folders you save files to.")
+                        Caption("No favorites yet. Add the folders you save files to, or let EchoNyla suggest some.")
                     } else {
-                        Caption("Every favorite is a place to drop files. Apple Intelligence only suggests a folder that has a note saying what goes there, and only for files that plainly match it. Leave the note empty to keep a folder for drag and drop, your rules and your own moves.")
+                        Caption("Every favorite is a place to drop files. Only \"Sort into this\" folders get files from \(model.modelName); \"Just for dragging\" folders get only what you drop on them, your rules and your own moves.")
+                    }
+                    if let progress = model.folderLearnProgress {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Caption(progress)
+                            Button("Stop") { model.cancelFolderLearning() }
+                                .buttonStyle(.pill)
+                        }
                     }
                     ForEach(model.favoriteFolders) { folder in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(nsImage: NSWorkspace.shared.icon(for: .folder))
-                                    .resizable()
-                                    .frame(width: 22, height: 22)
-                                Text(folder.name)
-                                    .font(.callout.weight(.medium))
-                                Spacer()
-                                if model.usesLocalModel, model.checkableFolders.contains(where: { $0.id == folder.id }) {
-                                    Button("Check This Folder") { model.checkFolder(id: folder.id) }
-                                        .buttonStyle(.borderless)
-                                        .disabled(!model.aiReady || model.folderCheckProgress != nil)
-                                }
-                                Button("Remove", role: .destructive) { model.removeFavorite(id: folder.id) }
-                                    .buttonStyle(.borderless)
-                            }
-                            TextField("What goes here? (optional, e.g. Chase statement CSV exports only)", text: Binding(
-                                get: { folder.purpose ?? "" },
-                                set: { model.setFolderPurpose(id: folder.id, to: $0) }
-                            ))
-                            .textFieldStyle(.roundedBorder)
-                            .padding(.leading, 26)
-                            Caption(folder.purpose?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                                    ? "\(model.modelName) may suggest this folder for files that match the note."
-                                    : "Drag and drop, rules and your own moves only.")
-                                .padding(.leading, 26)
-                        }
-                        .padding(.vertical, 2)
+                        FavoriteFolderRow(folder: folder)
                     }
                     HStack(spacing: 8) {
                         Button("Add Favorite Folder…", systemImage: "folder.badge.plus") { model.addFavoriteFromPanel() }
@@ -878,6 +860,74 @@ struct FoldersTab: View {
         let words = rule.keywords.joined(separator: ", ")
         let match = [types, words].filter { !$0.isEmpty }.joined(separator: " · ")
         return "\(match) → \(model.destinationName(for: rule.destinationID) ?? "Missing folder")"
+    }
+}
+
+/// One favorite folder: Sort into this or Just for dragging, and for Sort-into folders the note and
+/// what Bonsai learned from the files in it.
+struct FavoriteFolderRow: View {
+    @Environment(AppModel.self) private var model
+    let folder: FavoriteFolder
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSWorkspace.shared.icon(for: .folder))
+                    .resizable()
+                    .frame(width: 22, height: 22)
+                Text(folder.name)
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Picker("Use", selection: Binding(
+                    get: { folder.isSortTarget },
+                    set: { model.setFolderSortsInto(id: folder.id, $0) }
+                )) {
+                    Text("Sort into this").tag(true)
+                    Text("Just for dragging").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Button("Remove", role: .destructive) { model.removeFavorite(id: folder.id) }
+                    .buttonStyle(.borderless)
+            }
+            if folder.isSortTarget {
+                TextField("What goes here? (Bonsai can write this from the files in it)", text: Binding(
+                    get: { folder.purpose ?? "" },
+                    set: { model.setFolderPurpose(id: folder.id, to: $0) }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .padding(.leading, 30)
+                HStack(spacing: 10) {
+                    Caption(learnedText)
+                    Spacer()
+                    if model.usesLocalModel {
+                        Button(folder.learnedAt == nil ? "Learn From Its Files" : "Learn Again") { model.learnFolder(id: folder.id) }
+                            .buttonStyle(.borderless)
+                            .disabled(model.learningFolderID != nil)
+                        if model.checkableFolders.contains(where: { $0.id == folder.id }) {
+                            Button("Check This Folder") { model.checkFolder(id: folder.id) }
+                                .buttonStyle(.borderless)
+                                .disabled(!model.aiReady || model.folderCheckProgress != nil)
+                        }
+                    }
+                }
+                .padding(.leading, 30)
+            } else {
+                Caption("Only gets files you drop on it, your rules and your own moves.")
+                    .padding(.leading, 30)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var learnedText: String {
+        if model.learningFolderID == folder.id { return "Bonsai is looking at the files in it…" }
+        guard let date = folder.learnedAt else {
+            return model.usesLocalModel ? "Bonsai hasn't looked at its files yet." : "\(model.modelName) uses the note to decide what goes here."
+        }
+        let count = folder.learnedFrom ?? 0
+        return "Learned from \(count) file\(count == 1 ? "" : "s") on \(date.formatted(date: .abbreviated, time: .omitted))."
     }
 }
 
@@ -960,7 +1010,7 @@ struct SettingsTab: View {
             GroupBox("Moving files") {
                 VStack(alignment: .leading, spacing: 8) {
                     SettingToggle("Move files it's sure about by itself (with Undo)", isOn: $model.autoMove)
-                    Caption("Sure means: one of your rules, a macOS screenshot, a pattern from 3+ of your own moves, or the model certain about a folder you described and backed by what's inside the file. With Bonsai, it also has to quote the folder's note. New folders always wait for you; Bonsai's sure renames don't (see On-device model).")
+                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you; Bonsai's sure renames don't (see On-device model). This also applies to Deep Reorganize.")
                     SettingToggle("Show a notification for each automatic move or suggestion", isOn: $model.notificationsEnabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

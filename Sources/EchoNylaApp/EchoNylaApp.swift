@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// The tabs of the main window.
 enum MainTab: String, CaseIterable, Identifiable {
-    case activity, cleanup, find, folders, settings
+    case activity, cleanup, reorganize, find, folders, settings
 
     var id: String { rawValue }
 
@@ -55,6 +55,7 @@ enum MainTab: String, CaseIterable, Identifiable {
         switch self {
         case .activity: return "Activity"
         case .cleanup: return "Clean Up"
+        case .reorganize: return "Reorganize"
         case .find: return "Find"
         case .folders: return "Folders & Rules"
         case .settings: return "Settings"
@@ -65,6 +66,7 @@ enum MainTab: String, CaseIterable, Identifiable {
         switch self {
         case .activity: return "clock.arrow.circlepath"
         case .cleanup: return "sparkles.rectangle.stack"
+        case .reorganize: return "wand.and.stars"
         case .find: return "magnifyingglass"
         case .folders: return "folder.badge.gearshape"
         case .settings: return "gearshape"

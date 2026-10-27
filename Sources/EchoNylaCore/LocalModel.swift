@@ -86,7 +86,8 @@ public enum LocalPrompt {
         document, who it is from, what it is about.
         name: a clear, specific name for the file, 2 to 8 words, without the file extension and without a date. Build it \
         from things you can see in the file, like "Verbyn settings - Signature skin", "Acme Plumbing invoice" or \
-        "Biology 101 lab report". Never use filler words like Screenshot, Image, Photo, Document, File, Scan or Untitled.
+        "Biology 101 lab report". Never use filler words like Screenshot, Image, Photo, Document, File, Scan or Untitled. \
+        Name this file only: never copy a name from the examples. For an archive, say what the files inside have in common.
         name_confidence: 0 to 100, how sure you are that the name says what the file really is.
         folder: exactly one folder name from the list, or none. Choose the folder whose note describes what this file is, \
         and use how the person filed similar files before. A folder whose name only sounds similar is not enough. Answer \
@@ -108,7 +109,7 @@ public enum LocalPrompt {
             lines.append("There are no folders to choose from: answer none for the folder.")
         } else {
             lines.append("Folders (exact name: note on what goes there):")
-            lines += allowed.map { "- \($0.name): \(Destination.cleanPurpose($0.purpose) ?? "")" }
+            lines += allowed.map(AIFolders.line)
             if !examples.isEmpty {
                 lines.append("How this person filed similar files before:")
                 lines += examples.map { "- " + $0 }
@@ -119,7 +120,7 @@ public enum LocalPrompt {
 
     /// The whole conversation in Qwen's chat format, with thinking turned off (the answer starts
     /// straight away; the grammar keeps it to the JSON shape).
-    public static func conversation(question: String) -> String {
+    public static func conversation(question: String, instructions: String = LocalPrompt.instructions) -> String {
         "<|im_start|>system\n\(instructions)<|im_end|>\n<|im_start|>user\n\(question)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     }
 
@@ -213,17 +214,21 @@ public struct LocalDecision: Equatable, Sendable {
     /// The folder the model named, before any check (nil for none). Used by Test on My Files and folder checks.
     public var namedFolderID: String?
     public var folderConfidence: Int
-    /// True when the safety net passed for the named folder.
-    public var quotePassed: Bool
+    /// True when the safety net passed for the named folder: the file's words match that folder best.
+    public var matchesFolder: Bool
     /// True when the new name may be applied without asking.
     public var renameIsSure: Bool
+    /// The words the file and the named folder share.
+    public var sharedWords: [String]
 
-    public init(decision: FileDecision, namedFolderID: String?, folderConfidence: Int, quotePassed: Bool, renameIsSure: Bool) {
+    public init(decision: FileDecision, namedFolderID: String?, folderConfidence: Int, matchesFolder: Bool, renameIsSure: Bool,
+                sharedWords: [String] = []) {
         self.decision = decision
         self.namedFolderID = namedFolderID
         self.folderConfidence = folderConfidence
-        self.quotePassed = quotePassed
+        self.matchesFolder = matchesFolder
         self.renameIsSure = renameIsSure
+        self.sharedWords = sharedWords
     }
 }
 
@@ -233,30 +238,34 @@ public enum LocalDecisionCheck {
         let named = DecisionCheck.destination(for: answer.folder, destinations: destinations, locked: locked)
         let summary = DecisionCheck.oneLine(answer.whatItIs, limit: 300, fallback: "")
         let evidence = Evidence(facts: facts, description: summary)
-        let quotePassed = named.map { NoteQuoteCheck.passes(quote: answer.noteWords, note: $0.purpose ?? "", evidence: evidence) } ?? false
-        let sureFolder = named != nil && quotePassed && answer.folderConfidence >= bar.folder
-        let quote = TextTools.collapseWhitespace(answer.noteWords)
-        let reason: String
-        if let named, quotePassed {
-            reason = DecisionCheck.oneLine("Matches \"\(quote)\" in \(named.name)'s note.", limit: 160, fallback: "")
-        } else if named != nil {
-            reason = "Not sure this fits the folder's note."
-        } else {
-            reason = "No folder's note fits this file."
-        }
         // Words EchoNyla already knows the spelling of: folder names and notes, and the file's own text.
         let vocabulary = destinations.flatMap { [$0.name, $0.purpose ?? ""] } + [facts.text] + facts.imageLabels
         let title = SmartName.clean(answer.name, vocabulary: vocabulary)
+        let match = named.map { FolderMatch.check(named: $0, among: AIFolders.choosable(destinations, locked: locked),
+                                                  fileWords: FolderMatch.fileWords(evidence: evidence, title: title)) }
+        let matches = match?.passes ?? false
+        let sureFolder = named != nil && matches && answer.folderConfidence >= bar.folder
+        // A folder that shares nothing with the file is dropped; one that shares a little stays a suggestion.
+        let keptFolder = (match?.shared.isEmpty ?? true) ? nil : named
+        let reason: String
+        if let named, let match, matches {
+            let words = FolderMatch.spelled(Array(match.shared.prefix(4)), in: [title, summary, facts.text].joined(separator: " "))
+            reason = DecisionCheck.oneLine("Matches \(words.joined(separator: ", ")) in \(named.name).", limit: 160, fallback: "")
+        } else if keptFolder != nil {
+            reason = "Might fit, but not sure."
+        } else {
+            reason = "No folder fits this file."
+        }
         let proposedName = SmartName.make(title: title, original: facts.fileName, kind: facts.kind,
                                           captured: captured ?? facts.modified, calendar: calendar)
         let renameIsSure = proposedName != nil
             && answer.nameConfidence >= bar.name
             && NameQuality.isUnhelpful(facts.fileName)
             && RenameGrounding.isGrounded(title: title, evidence: evidence)
-        let decision = FileDecision(destinationID: (quotePassed && named != nil) ? named?.id : nil,
-                                    isConfident: sureFolder, reason: reason, proposedName: proposedName, summary: summary)
+        let decision = FileDecision(destinationID: keptFolder?.id, isConfident: sureFolder, reason: reason,
+                                    proposedName: proposedName, summary: summary)
         return LocalDecision(decision: decision, namedFolderID: named?.id, folderConfidence: answer.folderConfidence,
-                             quotePassed: quotePassed, renameIsSure: renameIsSure)
+                             matchesFolder: matches, renameIsSure: renameIsSure, sharedWords: match?.shared ?? [])
     }
 }
 
@@ -292,6 +301,21 @@ public enum Words {
         "is", "be", "as", "it", "if", "no", "yes"
     ]
 
+    /// Words in almost every description of a screen or a file ("A screenshot of an app window
+    /// showing…"). They say nothing about which folder a file belongs in.
+    static let generic: Set<String> = [
+        "app", "apps", "application", "applications", "screen", "screens", "window", "windows", "interface", "showing", "shows",
+        "show", "shown", "displaying", "displays", "display", "displayed", "view", "views", "user", "users", "text", "page",
+        "button", "buttons", "menu", "menus", "icon", "icons", "logo", "dark", "light", "white", "black", "blue", "green",
+        "red", "gray", "grey", "color", "colors", "colour", "colours", "website", "web", "site", "online", "content",
+        "contents", "information", "info", "details", "detail", "list", "lists", "section", "sections", "title", "titled",
+        "label", "labels", "labeled", "option", "options", "panel", "panels", "tab", "tabs", "dialog", "macos", "mac",
+        "computer", "desktop", "background", "top", "bottom", "left", "right", "side", "various", "several", "many",
+        "include", "includes", "including", "contain", "contains", "containing", "featuring", "features", "feature",
+        "related", "using", "used", "use", "being", "appears", "appear", "likely", "possibly", "seems", "named", "called",
+        "version", "edited", "data", "small", "large", "main", "open", "opened", "set", "image", "picture", "frame"
+    ]
+
     /// Lowercased words of 3+ letters or digits that say something (filler and dates left out).
     public static func meaningful(_ text: String) -> [String] {
         TextTools.words(text).filter { word in
@@ -299,29 +323,120 @@ public enum Words {
         }
     }
 
+    /// Stems of the words that can tell one folder from another: meaningful, and not in every
+    /// description of a screen ("app", "window", "showing").
+    public static func distinctive(_ text: String) -> Set<String> {
+        Set(meaningful(text).filter { !generic.contains($0) }.map(stem))
+    }
+
     /// A crude stem so "invoices" matches "invoice" and "receipts" matches "receipt".
+    /// "es" only goes after s, x, z, ch and sh ("taxes", "boxes"), so "invoices" matches "invoice" too.
     public static func stem(_ word: String) -> String {
         var word = word
-        for suffix in ["ies", "es", "s"] where word.count > suffix.count + 3 && word.hasSuffix(suffix) {
-            word = String(word.dropLast(suffix.count)) + (suffix == "ies" ? "y" : "")
-            break
+        if word.count > 6, word.hasSuffix("ies") {
+            word = String(word.dropLast(3)) + "y"
+        } else if word.count > 5, word.hasSuffix("es"), ["s", "x", "z", "ch", "sh"].contains(where: { word.dropLast(2).hasSuffix($0) }) {
+            word = String(word.dropLast(2))
+        } else if word.count > 4, word.hasSuffix("s"), !word.hasSuffix("ss") {
+            word = String(word.dropLast())
         }
         return String(word.prefix(7))
     }
 }
 
-/// The safety net: before a folder is used, the model has to quote the words from that folder's
-/// note that the file matches, and those words have to be in the note and in what was seen in the
-/// file. A loose match ("2 week notice" for a folder of app pictures) can't quote anything true.
-public enum NoteQuoteCheck {
-    public static func passes(quote: String, note: String, evidence: Evidence) -> Bool {
-        let quoted = Words.meaningful(quote).map(Words.stem)
-        guard !quoted.isEmpty else { return false }
-        let noteWords = Set(Words.meaningful(note).map(Words.stem))
-        // Every quoted word must really be in the note (no made-up quotes)…
-        guard quoted.allSatisfy({ noteWords.contains($0) }) else { return false }
-        // …and at least one of them must describe this file.
-        return quoted.contains { evidence.all.contains($0) }
+/// The safety net (since 3.2.0; it replaced quoting the folder's note, which failed on nearly every
+/// real answer). A folder the model names counts only when what's in the file matches what's known
+/// about the folder (its name, its note, and the words Bonsai learned from the files already in
+/// it) better than any other folder: at least two shared words, or one that no other folder has.
+/// A tie with another folder isn't sure either: those files wait for you.
+public enum FolderMatch {
+    public struct Result: Equatable, Sendable {
+        public var passes: Bool
+        /// The words shared with the named folder, as stems, most telling first.
+        public var shared: [String]
+    }
+
+    /// What's known about a folder, as stems.
+    public static func folderWords(_ folder: Destination) -> Set<String> {
+        Words.distinctive(folder.name + " " + (folder.purpose ?? "")).union(folder.learnedWords)
+    }
+
+    /// What's known about a file: its own text, labels and websites, the model's description of it, and its new name.
+    public static func fileWords(evidence: Evidence, title: String) -> Set<String> {
+        evidence.all.subtracting(Words.generic.map(Words.stem)).union(Words.distinctive(title))
+    }
+
+    /// The words a file shares with a folder. A long word also matches a folder name it starts
+    /// ("purevo" in "purevopic").
+    public static func shared(fileWords: Set<String>, folder: Destination) -> [String] {
+        let words = folderWords(folder)
+        let glued = TextTools.words(folder.name).filter { $0.count >= 6 }
+        let matches = fileWords.filter { word in
+            words.contains(word) || (word.count >= 5 && glued.contains { $0 != word && $0.hasPrefix(word) })
+        }
+        return matches.sorted { $0.count != $1.count ? $0.count > $1.count : $0 < $1 }
+    }
+
+    /// The file's own spelling of shared words, for reasons ("Purevo, waveform" rather than stems).
+    public static func spelled(_ stems: [String], in text: String) -> [String] {
+        var spelling: [String: String] = [:]
+        for raw in text.components(separatedBy: CharacterSet.alphanumerics.inverted) where raw.count >= 3 {
+            let stem = Words.stem(raw.lowercased())
+            if spelling[stem] == nil { spelling[stem] = raw }
+        }
+        return stems.map { spelling[$0] ?? $0 }
+    }
+
+    public static func check(named: Destination, among folders: [Destination], fileWords: Set<String>) -> Result {
+        let mine = shared(fileWords: fileWords, folder: named)
+        let others = folders.filter { $0.id != named.id }
+        let bestOther = others.map { shared(fileWords: fileWords, folder: $0).count }.max() ?? 0
+        let otherWords = others.reduce(into: Set<String>()) { $0.formUnion(folderWords($1)) }
+        let onlyHere = mine.contains { !otherWords.contains($0) }
+        let enough = mine.count >= 2 || (mine.count == 1 && onlyHere)
+        return Result(passes: enough && mine.count > bestOther, shared: mine)
+    }
+}
+
+/// A folder's learned words: what Bonsai saw in the files already in it. A word counts when it
+/// turns up in at least two of the sampled files (or the only one, for a folder with one file).
+public enum FolderProfile {
+    public static let sampleSize = 12
+    public static let wordLimit = 40
+
+    public static func words(samples: [String]) -> [String] {
+        var counts: [String: Int] = [:]
+        for sample in samples {
+            for word in Words.distinctive(sample) { counts[word, default: 0] += 1 }
+        }
+        let needed = samples.count <= 1 ? 1 : 2
+        return counts.filter { $0.value >= needed }
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(wordLimit).map(\.key)
+    }
+
+    /// The question for a folder's note: what the sampled files are.
+    public static func notePrompt(folderName: String, descriptions: [String]) -> String {
+        let lines = descriptions.prefix(sampleSize).map { "- " + TextTools.redactLongNumbers($0) }.joined(separator: "\n")
+        let ask = "These files are in the folder \"\(TextTools.redactLongNumbers(folderName))\":\n\(lines)\n"
+            + "Write one short sentence saying what kind of files belong in this folder, using the specific names, "
+            + "apps, companies or subjects they share. No more than 20 words."
+        return LocalPrompt.conversation(question: ask, instructions: "You describe folders on a Mac in plain words.")
+    }
+
+    public static let noteGrammar = """
+        root ::= "{" ws "\\"note\\":" ws note ws "}"
+        note ::= "\\"" char{3,160} "\\""
+        char ::= [^"\\\\\\x00-\\x1F\\x7F]
+        ws ::= [ \\n]{0,2}
+        """
+
+    /// The note from the model's answer, made safe to show; nil when unusable.
+    public static func parseNote(_ text: String) -> String? {
+        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}"), start < end,
+              let object = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [String: Any],
+              let note = object["note"] as? String else { return nil }
+        return SetupSuggestions.cleanNote(note)
     }
 }
 
@@ -501,23 +616,23 @@ public struct ModelTrial: Equatable, Sendable {
     public var expectedFolderID: String
     public var namedFolderID: String?
     public var folderConfidence: Int
-    public var quotePassed: Bool
+    public var matchesFolder: Bool
     public var seconds: Double
     /// Other folders that hold an exact copy of the file, so naming one of them is right too.
     public var copyFolderIDs: Set<String>
 
-    public init(expectedFolderID: String, namedFolderID: String?, folderConfidence: Int, quotePassed: Bool, seconds: Double,
+    public init(expectedFolderID: String, namedFolderID: String?, folderConfidence: Int, matchesFolder: Bool, seconds: Double,
                 copyFolderIDs: Set<String> = []) {
         self.expectedFolderID = expectedFolderID
         self.namedFolderID = namedFolderID
         self.folderConfidence = folderConfidence
-        self.quotePassed = quotePassed
+        self.matchesFolder = matchesFolder
         self.seconds = seconds
         self.copyFolderIDs = copyFolderIDs
     }
 
     /// Would EchoNyla have moved it by itself at this bar?
-    public func isSure(at bar: Int) -> Bool { namedFolderID != nil && quotePassed && folderConfidence >= bar }
+    public func isSure(at bar: Int) -> Bool { namedFolderID != nil && matchesFolder && folderConfidence >= bar }
     public var isRight: Bool { namedFolderID == expectedFolderID || isCopyMatch }
     /// It named another folder that has the same file in it.
     public var isCopyMatch: Bool { namedFolderID.map { $0 != expectedFolderID && copyFolderIDs.contains($0) } ?? false }
@@ -542,10 +657,10 @@ public struct ModelTestSummary: Equatable, Sendable {
     public var recommendedBar: Int?
     /// Right answers that named another folder holding the same file.
     public var copies: Int = 0
-    /// The highest folder score it gave with a folder named, and how many named folders it
-    /// couldn't quote the note of. Together they say why nothing was sure.
+    /// The highest folder score it gave with a folder named, and how many named folders didn't
+    /// match what's in the file. Together they say why nothing was sure.
     public var highestFolderScore: Int? = nil
-    public var unquoted: Int = 0
+    public var unmatched: Int = 0
 
     public var sureAccuracy: Double? { sure == 0 ? nil : Double(sureRight) / Double(sure) }
 }
@@ -564,7 +679,7 @@ public enum ModelTest {
                                 sureRight: sure.filter(\.isRight).count, averageSeconds: seconds,
                                 recommendedBar: recommendedBar(trials), copies: trials.filter(\.isCopyMatch).count,
                                 highestFolderScore: named.map(\.folderConfidence).max(),
-                                unquoted: named.filter { !$0.quotePassed }.count)
+                                unmatched: named.filter { !$0.matchesFolder }.count)
     }
 
     /// Folder pairs it mixed up at least twice, most first: a sign the two folders' notes say the same thing.
