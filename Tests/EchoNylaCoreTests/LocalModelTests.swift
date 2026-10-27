@@ -48,17 +48,35 @@ final class LocalModelTests: XCTestCase {
         Destination(id: "loose", name: "Loose", purpose: nil)
     ]
 
-    func testTheQuestionListsOnlyDescribedFoldersAndThePicture() {
+    func testTheFoldersComeFirstAndTheFileAfter() {
         let facts = FileFacts(fileName: "Screenshot 2026-10-27 at 9.41.02 AM.png", isScreenshot: true, text: "Verbyn Settings Signature")
-        let question = LocalPrompt.question(facts: facts, destinations: folders, locked: [], currentFolderName: "Bills", imageMarker: "<__media__>")
+        // The folders sit in the instructions, which are the same for every file.
+        let shared = LocalPrompt.instructions(destinations: folders, locked: [])
+        XCTAssertTrue(shared.hasPrefix(LocalPrompt.instructions))
+        XCTAssertTrue(shared.contains("- purevopic: Pictures and screen recordings for the Purevo app's website"))
+        XCTAssertTrue(shared.contains("- Bills: Utility bills and invoices for the apartment"))
+        XCTAssertFalse(shared.contains("- Loose"))
+        XCTAssertTrue(LocalPrompt.instructions(destinations: [], locked: []).hasSuffix("answer none for the folder."))
+        // The question is only about the file.
+        let question = LocalPrompt.question(facts: facts, currentFolderName: "Bills", imageMarker: "<__media__>")
         XCTAssertTrue(question.hasPrefix("Picture of the file:\n<__media__>\n"))
-        XCTAssertTrue(question.contains("- purevopic: Pictures and screen recordings for the Purevo app's website"))
-        XCTAssertTrue(question.contains("- Bills: Utility bills and invoices for the apartment"))
-        XCTAssertFalse(question.contains("- Loose"))
+        XCTAssertFalse(question.contains("purevopic"))
         XCTAssertTrue(question.contains("The file is now in the folder \"Bills\"."))
         let chat = LocalPrompt.conversation(question: "Q")
         XCTAssertTrue(chat.hasPrefix("<|im_start|>system\n"))
+        XCTAssertEqual(chat, LocalPrompt.system(LocalPrompt.instructions) + LocalPrompt.turn("Q"))
         XCTAssertTrue(chat.hasSuffix("<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"))
+    }
+
+    func testDocumentsWithEnoughTextGoWithoutAPicture() {
+        let page = String(repeating: "Acme Plumbing invoice for kitchen sink repair. ", count: 10)
+        XCTAssertFalse(PictureNeed.wanted(FileFacts(fileName: "invoice.pdf", text: page)))
+        XCTAssertFalse(PictureNeed.wanted(FileFacts(fileName: "letter.docx", text: page)))
+        XCTAssertTrue(PictureNeed.wanted(FileFacts(fileName: "scan.pdf", text: "12 / 3")))
+        XCTAssertTrue(PictureNeed.wanted(FileFacts(fileName: "Screenshot.png", isScreenshot: true, text: page)))
+        XCTAssertTrue(PictureNeed.wanted(FileFacts(fileName: "budget.xlsx", text: page)))
+        XCTAssertFalse(PictureNeed.wanted(FileFacts(fileName: "budget.csv", text: page)))
+        XCTAssertFalse(PictureNeed.wanted(FileFacts(fileName: "notes.txt", text: "")))
     }
 
     func testTheGrammarOffersOnlyNoneAndTheFolders() {
@@ -66,6 +84,8 @@ final class LocalModelTests: XCTestCase {
         XCTAssertTrue(grammar.contains(#"folder ::= "\"none\"" | "\"purevopic\"" | "\"Sam's \\\"Q\\\" folder\"""#))
         XCTAssertTrue(grammar.contains(#"score ::= "100" | [1-9] [0-9] | [0-9]"#))
         XCTAssertTrue(grammar.hasPrefix("root ::= \"{\""))
+        XCTAssertFalse(grammar.contains("note_words"))
+        XCTAssertTrue(grammar.contains(#"text ::= "\"" char{0,160} "\"""#))
     }
 
     func testAnswersAreReadAndScoresKeptInRange() throws {
@@ -137,7 +157,7 @@ final class LocalModelTests: XCTestCase {
         let facts = FileFacts(fileName: "Screenshot 2026-10-27 at 9.41.02 AM.png", isScreenshot: true,
                               text: "Purevo Clean audio Before After", imageLabels: ["screenshot"])
         let answer = LocalAnswer(whatItIs: "A screenshot of the Purevo app's Clean audio screen.", name: "Purevo Clean audio screen",
-                                 nameConfidence: 88, folder: "purevopic", noteWords: "Purevo app's website", folderConfidence: 91)
+                                 nameConfidence: 88, folder: "purevopic", folderConfidence: 91)
         let result = LocalDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
         XCTAssertEqual(result.decision.destinationID, "pics")
         XCTAssertTrue(result.decision.isConfident)
@@ -227,7 +247,7 @@ final class LocalModelTests: XCTestCase {
         let facts = FileFacts(fileName: "Screenshot 2026-10-25 at 12.33.33 AM (2).png", isScreenshot: true,
                               text: "Purevo Congrats (Purevo).wav Clean audio")
         let answer = LocalAnswer(whatItIs: "Purevo's window with a file loaded.", name: "Purevo interface - Congrats (Purevo).wav",
-                                 nameConfidence: 90, folder: "none", noteWords: "", folderConfidence: 0)
+                                 nameConfidence: 90, folder: "none", folderConfidence: 0)
         let result = LocalDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
         XCTAssertEqual(result.decision.proposedName, "2026-10-25 Purevo interface - Congrats (Purevo).png")
         XCTAssertTrue(result.renameIsSure)
@@ -235,10 +255,9 @@ final class LocalModelTests: XCTestCase {
 
     func testTheQuestionCarriesPastFilingExamples() {
         let facts = FileFacts(fileName: "a.png")
-        let question = LocalPrompt.question(facts: facts, destinations: folders, locked: [],
-                                            examples: ["“Purevo before-after.png” → purevopic"], imageMarker: nil)
+        let question = LocalPrompt.question(facts: facts, examples: ["“Purevo before-after.png” → purevopic"], imageMarker: nil)
         XCTAssertTrue(question.contains("How this person filed similar files before:\n- “Purevo before-after.png” → purevopic"))
-        XCTAssertFalse(LocalPrompt.question(facts: facts, destinations: folders, locked: [], imageMarker: nil).contains("filed similar"))
+        XCTAssertFalse(LocalPrompt.question(facts: facts, imageMarker: nil).contains("filed similar"))
         XCTAssertEqual(ConfidenceBar.standard.folder, 80)
     }
 
@@ -255,52 +274,6 @@ final class LocalModelTests: XCTestCase {
         XCTAssertEqual(SmartName.make(title: "Acme Plumbing invoice", original: "scan.pdf", kind: .pdf, captured: captured, calendar: calendar),
                        "Acme Plumbing invoice.pdf")
         XCTAssertNil(SmartName.make(title: "Screenshot", original: "IMG_1.png", kind: .pdf, captured: nil, calendar: calendar))
-    }
-
-    // MARK: Test on My Files
-
-    private func trial(_ expected: String, _ named: String?, _ score: Int, quote: Bool = true) -> ModelTrial {
-        ModelTrial(expectedFolderID: expected, namedFolderID: named, folderConfidence: score, matchesFolder: quote, seconds: 2)
-    }
-
-    func testTheBarIsSetFromYourFiles() {
-        // Wrong answers only at 80-84: at bar 85 and above every sure answer is right.
-        var trials = (0..<6).map { _ in trial("a", "a", 90) }
-        trials += [trial("a", "b", 82), trial("a", "b", 81), trial("b", "b", 75, quote: false)]
-        XCTAssertEqual(ModelTest.recommendedBar(trials), 85)
-        let summary = ModelTest.summarize(trials, bar: 80)
-        XCTAssertEqual(summary.files, 9)
-        XCTAssertEqual(summary.right, 7)
-        XCTAssertEqual(summary.sure, 8)
-        XCTAssertEqual(summary.sureRight, 6)
-        XCTAssertEqual(summary.averageSeconds, 2)
-        XCTAssertEqual(summary.recommendedBar, 85)
-        XCTAssertEqual(ModelTest.barAfterTest(trials), 85)
-        // Too few sure answers to tell: no recommendation, and the bar stays as it is.
-        XCTAssertNil(ModelTest.recommendedBar([trial("a", "a", 99)]))
-        XCTAssertNil(ModelTest.barAfterTest([trial("a", "a", 99)]))
-        // Plenty of sure answers, but wrong too often at every bar: always ask.
-        let unreliable = (0..<6).map { _ in trial("a", "b", 99) } + (0..<6).map { _ in trial("a", "a", 99) }
-        XCTAssertEqual(ModelTest.barAfterTest(unreliable), 101)
-    }
-
-    func testCopiesCountAsRightAndTheReportSaysWhyNothingWasSure() {
-        // The first real run: newfo's screenshots also sit in allsame, which Bonsai named.
-        let copy = ModelTrial(expectedFolderID: "newfo", namedFolderID: "allsame", folderConfidence: 70, matchesFolder: false,
-                              seconds: 8, copyFolderIDs: ["allsame"])
-        XCTAssertTrue(copy.isRight)
-        XCTAssertTrue(copy.isCopyMatch)
-        let trials = [copy, trial("purevopic", "allsame", 75, quote: false), trial("purevopic", "allsame", 60),
-                      trial("newfo", nil, 0), trial("allsame", "allsame", 72)]
-        let summary = ModelTest.summarize(trials, bar: 80)
-        XCTAssertEqual(summary.right, 2)
-        XCTAssertEqual(summary.copies, 1)
-        XCTAssertEqual(summary.sure, 0)
-        XCTAssertEqual(summary.highestFolderScore, 75)
-        XCTAssertEqual(summary.unmatched, 2)
-        // purevopic → allsame twice is a mix-up; the copy and the single "none" aren't.
-        XCTAssertEqual(ModelTest.mixUps(trials), [FolderMixUp(expectedFolderID: "purevopic", namedFolderID: "allsame", count: 2)])
-        XCTAssertNil(ModelTest.summarize([trial("a", nil, 0)], bar: 80).highestFolderScore)
     }
 
     // MARK: Check This Folder and Undo All

@@ -5,7 +5,8 @@ import Foundation
 /// One file to ask the on-device model about.
 public struct LocalQuestion: Sendable {
     public var facts: FileFacts
-    /// A picture of the file: the image itself, a PDF's first page, or a document's preview.
+    /// A picture of the file: the image itself, a PDF's first page, or a document's preview. Nil when
+    /// the file's words say enough (`PictureNeed`).
     public var picture: RGBImage?
     public var destinations: [Destination]
     public var locked: Set<String>
@@ -39,11 +40,12 @@ public enum LocalFileModel {
     public static func ask(_ question: LocalQuestion, paths: ModelPaths, bar: ConfidenceBar,
                            engine: LlamaEngine = .shared) async throws -> LocalResult {
         let allowed = AIFolders.choosable(question.destinations, locked: question.locked)
-        let text = LocalPrompt.question(facts: question.facts, destinations: question.destinations, locked: question.locked,
-                                        currentFolderName: question.currentFolderName, examples: question.examples,
-                                        imageMarker: question.picture == nil ? nil : LlamaEngine.marker)
-        let reply = try await engine.generate(paths: paths, prompt: LocalPrompt.conversation(question: text),
-                                              image: question.picture, grammar: LocalPrompt.grammar(folderNames: allowed.map(\.name)))
+        let text = LocalPrompt.question(facts: question.facts, currentFolderName: question.currentFolderName,
+                                        examples: question.examples, imageMarker: question.picture == nil ? nil : LlamaEngine.marker)
+        // The instructions and folders are the same for every file, so the engine keeps them in memory.
+        let shared = LocalPrompt.system(LocalPrompt.instructions(destinations: question.destinations, locked: question.locked))
+        let reply = try await engine.generate(paths: paths, shared: shared, prompt: LocalPrompt.turn(text), image: question.picture,
+                                              grammar: LocalPrompt.grammar(folderNames: allowed.map(\.name)))
         guard let answer = LocalAnswer.parse(reply.text) else { throw EngineError.evaluationFailed(-100) }
         let decision = LocalDecisionCheck.check(answer, facts: question.facts, destinations: question.destinations,
                                                 locked: question.locked, bar: bar, captured: question.captured)

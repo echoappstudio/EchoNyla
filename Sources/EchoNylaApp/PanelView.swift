@@ -173,7 +173,7 @@ struct PanelView: View {
         .background(NylaStyle.wash(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 
-    /// One clear action: open the full window. Clean Up and Find are in the ⋯ menu.
+    /// One clear action: open the full window, with Quit beside it. Clean Up and Find are in the ⋯ menu.
     private var footer: some View {
         HStack {
             Spacer()
@@ -185,6 +185,7 @@ struct PanelView: View {
             .buttonStyle(.brass)
             Spacer()
         }
+        .overlay(alignment: .trailing) { QuitButton() }
         .padding(12)
     }
 }
@@ -325,10 +326,12 @@ struct PendingCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 FileTypeIcon(fileName: pending.url.lastPathComponent, path: pending.url.path, size: 30)
+                    .filePreview(pending.url)
                 Text(pending.url.lastPathComponent)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .font(.subheadline.weight(.medium))
+                    .filePreview(pending.url)
                 Spacer(minLength: 6)
                 Button { model.cancelPendingDrop() } label: {
                     Image(systemName: "xmark.circle.fill")

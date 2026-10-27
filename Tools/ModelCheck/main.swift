@@ -12,7 +12,7 @@ import Foundation
 
 var folder: URL?
 var cpuOnly = false
-var imageTokens: Int32 = 1_024
+var imageTokens = LlamaEngine.Options().imageMaxTokens
 var arguments = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = arguments.next() {
     switch argument {
@@ -64,14 +64,18 @@ let folders = [
 
 func report(_ title: String, _ result: LocalResult) {
     let answer = result.answer
+    let reply = result.reply
     print("""
         \(title)
           what it is:  \(answer.whatItIs)
           name:        \(answer.name) (confidence \(answer.nameConfidence))
-          folder:      \(answer.folder) (confidence \(answer.folderConfidence)), quoted "\(answer.noteWords)"
+          folder:      \(answer.folder) (confidence \(answer.folderConfidence))
           checked:     folder \(result.decision.decision.destinationID ?? "none"), moves by itself: \(result.decision.decision.isConfident), \
         new name: \(result.decision.decision.proposedName ?? "none"), renames by itself: \(result.decision.renameIsSure)
-          time:        \(String(format: "%.1f", result.reply.seconds)) s for \(result.reply.promptTokens) prompt and \(result.reply.generatedTokens) answer tokens
+          time:        \(String(format: "%.1f", reply.seconds)) s for \(reply.promptTokens) prompt tokens (\(reply.rememberedTokens) remembered) \
+        and \(reply.generatedTokens) answer tokens: load \(String(format: "%.1f", reply.loadSeconds)) s, picture \
+        \(String(format: "%.1f", reply.pictureSeconds)) s, words \(String(format: "%.1f", reply.readSeconds)) s, \
+        answer \(String(format: "%.1f", reply.answerSeconds)) s
           peak memory: \(gigabytes(result.reply.peakMemoryBytes))
         """)
 }
@@ -125,6 +129,8 @@ Task {
                                                   paths: paths, bar: .standard, engine: engine)
         report("2. Resignation letter (text only)", second)
         if second.decision.decision.destinationID == "pics" { failures.append("the resignation letter passed the safety net for purevopic") }
+        // The same folders: the instructions came from memory instead of being read again.
+        if second.reply.rememberedTokens == 0 { failures.append("the instructions and folders weren't kept between files") }
     } catch {
         failures.append(error.localizedDescription)
     }

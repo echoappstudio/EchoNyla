@@ -301,11 +301,13 @@ struct ReorganizeItemRow: View {
             .disabled(item.destinationID == nil)
             .padding(.top, 6)
             FileTypeIcon(fileName: item.url.lastPathComponent, path: item.url.path, size: 28)
+                .filePreview(item.url)
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.url.lastPathComponent)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .filePreview(item.url)
                 Caption(item.url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                     .lineLimit(1)
                     .truncationMode(.head)

@@ -161,6 +161,8 @@ struct SidebarView: View {
             }
             Spacer(minLength: 12)
             IntelligenceCard()
+            QuitButton()
+                .padding(.top, 8)
         }
         .padding(.horizontal, 14)
         .padding(.top, 46)
@@ -181,6 +183,19 @@ struct SidebarView: View {
         default:
             return nil
         }
+    }
+}
+
+/// Quits EchoNyla, always in sight: at the bottom of the sidebar and beside Open EchoNyla in the panel.
+struct QuitButton: View {
+    var body: some View {
+        Button {
+            NSApp.terminate(nil)
+        } label: {
+            Label("Quit", systemImage: "power")
+        }
+        .buttonStyle(.pill)
+        .help("Quit EchoNyla")
     }
 }
 
@@ -661,11 +676,13 @@ struct CleanupRowView: View {
             .disabled(!row.hasTarget)
             .padding(.top, 6)
             FileTypeIcon(fileName: row.url.lastPathComponent, path: row.url.path, size: 30)
+                .filePreview(row.url)
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.url.lastPathComponent)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .filePreview(row.url)
                 Caption(row.chosenFolder.map { "Your choice: \($0.lastPathComponent)" } ?? row.suggestionReason ?? "No suggestion. Choose a folder.")
                 if let summary = row.summary {
                     Caption(summary)
@@ -748,8 +765,10 @@ struct SearchResultRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 FileTypeIcon(fileName: result.url.lastPathComponent, path: result.url.path, size: 32)
+                    .filePreview(result.url)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.name)
+                        .filePreview(result.url)
                         .font(.callout.weight(.medium))
                         .lineLimit(1)
                         .truncationMode(.middle)

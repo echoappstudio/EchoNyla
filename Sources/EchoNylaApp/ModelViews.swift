@@ -2,7 +2,7 @@ import AppKit
 import EchoNylaCore
 import SwiftUI
 
-/// Settings → On-device model: Bonsai or Apple Intelligence, the download, and Test on My Files.
+/// Settings → On-device model: Bonsai or Apple Intelligence, and the download.
 struct ModelSettings: View {
     @Environment(AppModel.self) private var model
 
@@ -57,104 +57,16 @@ struct ModelSettings: View {
                   systemImage: "checkmark.seal")
                 .font(.callout)
             Caption(barText)
-            HStack(spacing: 8) {
-                if model.modelTestProgress == nil {
-                    Button("Test on My Files", systemImage: "checklist") { model.runModelTest() }
-                        .buttonStyle(.pill)
-                } else {
-                    ProgressView().controlSize(.small)
-                    Caption(model.modelTestProgress ?? "")
-                    Button("Stop") { model.cancelModelTest() }
-                        .buttonStyle(.pill)
-                }
+            HStack {
                 Spacer()
                 Button("Remove Bonsai", role: .destructive) { model.removeLocalModel() }
                     .buttonStyle(.borderless)
-            }
-            if let report = model.modelTestReport {
-                ModelTestReportView(report: report)
             }
         }
     }
 
     private var barText: String {
-        let bar = model.confidenceBar.folder
-        let moves = bar > 100 ? "Folder moves always ask you first (Test on My Files found its sure answers weren't reliable enough)."
-            : "It moves a file by itself when it's at least \(bar)% sure and what's in the file matches that Sort-into folder better than any other."
-        return moves + " It renames by itself when it's at least \(model.confidenceBar.name)% sure, the name comes from what's in the file, and the old name said nothing (like \"Screenshot 2026-10-27 at 9.41.02\" or \"IMG_4821\"). Everything else waits for you."
-    }
-}
-
-struct ModelTestReportView: View {
-    let report: ModelTestReport
-    @State private var copied = false
-
-    var body: some View {
-        let summary = report.summary
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel("Test on My Files")
-            Text("\(summary.right) of \(summary.files) files: Bonsai named the folder you chose.")
-            if summary.copies > 0 {
-                Caption("\(summary.copies) of those named another folder that has the same file in it, so they count as right.")
-            }
-            if let accuracy = summary.sureAccuracy {
-                Text("When it was sure (\(summary.sure) files), it was right \(Int((accuracy * 100).rounded()))% of the time.")
-            } else {
-                Text("It wasn't sure enough about any of them to move them by itself.")
-                if let highest = summary.highestFolderScore {
-                    Caption("Its highest folder score was \(highest)%."
-                            + (summary.unmatched > 0 ? " \(summary.unmatched) answers didn't match the folder well enough." : ""))
-                }
-            }
-            Text(barLine)
-            Caption(String(format: "About %.1f s per file. Peak memory: %@.", summary.averageSeconds,
-                           ByteCountFormatter.string(fromByteCount: Int64(report.peakMemoryBytes), countStyle: .memory)))
-            if !report.mixUps.isEmpty {
-                SectionLabel("Folders it mixes up")
-                ForEach(Array(report.mixUps.enumerated()), id: \.offset) { _, mixUp in
-                    Caption("\(mixUp.0) files went to \(mixUp.1) \(mixUp.2) times")
-                }
-                Caption("Those folders hold the same kind of files. Set one to Just for dragging, give each a note that says what makes it different, or Learn Again.")
-            }
-            if !report.misses.isEmpty {
-                SectionLabel("Where it differed from you")
-                ForEach(Array(report.misses.enumerated()), id: \.offset) { _, miss in
-                    Caption(missLine(miss))
-                }
-                Caption("If its answer looks right, the file may be in the wrong folder. If not, the folder's note may need clearer words.")
-            }
-            if !report.renames.isEmpty {
-                SectionLabel("Names it would give")
-                ForEach(Array(report.renames.enumerated()), id: \.offset) { _, pair in
-                    Caption("\(pair.0) → \(pair.1)")
-                }
-            }
-            HStack(spacing: 8) {
-                Button("Copy Details", systemImage: "doc.on.doc") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(report.details, forType: .string)
-                    copied = true
-                }
-                .buttonStyle(.pill)
-                Caption(copied ? "Copied. Paste it into your chat about EchoNyla." : "Every answer in plain text, with your file names.")
-            }
-            .padding(.top, 4)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .cardSurface(radius: 10)
-    }
-
-    private func missLine(_ miss: ModelTestMiss) -> String {
-        guard let said = miss.said else { return "\(miss.file): it said none, you chose \(miss.chose)" }
-        let quote = miss.matched ? "" : ", didn't match the folder"
-        return "\(miss.file): it said \(said) (\(miss.score)%\(quote)), you chose \(miss.chose)"
-    }
-
-    private var barLine: String {
-        if report.barAfter > 100 { return "Its sure answers weren't right often enough, so folder moves will ask you first." }
-        if report.barAfter == report.barBefore { return "The bar for moving by itself stays at \(report.barAfter)%." }
-        return "The bar for moving by itself is now \(report.barAfter)% (was \(report.barBefore)%), so sure answers stay right at least 95% of the time."
+        "It moves a file by itself when it's at least \(model.confidenceBar.folder)% sure and what's in the file matches that Sort-into folder better than any other. It renames by itself when it's at least \(model.confidenceBar.name)% sure, the name comes from what's in the file, and the old name said nothing (like \"Screenshot 2026-10-27 at 9.41.02\" or \"IMG_4821\"). Everything else waits for you."
     }
 }
 
@@ -196,10 +108,12 @@ struct FolderCheckCard: View {
     private func findingRow(_ finding: FolderCheckFinding) -> some View {
         HStack(alignment: .top, spacing: 10) {
             FileTypeIcon(fileName: finding.url.lastPathComponent, path: finding.url.path, size: 28)
+                .filePreview(finding.url)
             VStack(alignment: .leading, spacing: 2) {
                 Text(finding.url.lastPathComponent)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .filePreview(finding.url)
                 Caption("In \(model.destinationName(for: finding.folderID) ?? "a folder"). \(finding.note)")
             }
             Spacer()

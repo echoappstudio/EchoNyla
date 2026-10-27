@@ -49,62 +49,6 @@ struct FolderCheckFinding: Identifiable {
     let note: String
 }
 
-/// The result of Test on My Files.
-struct ModelTestReport {
-    let summary: ModelTestSummary
-    let barBefore: Int
-    let barAfter: Int
-    /// Old name → new name, for files whose names said nothing.
-    let renames: [(String, String)]
-    let misses: [ModelTestMiss]
-    /// Your folder, the folder Bonsai named instead, and how many times.
-    let mixUps: [(String, String, Int)]
-    let peakMemoryBytes: UInt64
-    /// Every question and answer in plain text, for Copy Details.
-    let details: String
-}
-
-/// Test on My Files in plain text, to paste to whoever tunes EchoNyla: the folders as Bonsai sees
-/// them, then each file's answer. File names and descriptions stay on this Mac unless you paste them.
-enum ModelTestDetails {
-    static func header(folders: [FavoriteFolder]) -> String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        var lines = ["EchoNyla \(version) · Test on My Files", "Sort-into folders:"]
-        for folder in folders {
-            let learned = (folder.learnedWords ?? []).prefix(15).joined(separator: ", ")
-            lines.append("- \(folder.name): \(folder.purpose ?? "(no note)")" + (learned.isEmpty ? "" : " | learned: \(learned)"))
-        }
-        return lines.joined(separator: "\n") + "\n"
-    }
-
-    static func line(file: String, chose: String, judged: LocalDecision, answer: LocalAnswer?, seconds: Double, isRight: Bool) -> String {
-        var lines = ["", "\(isRight ? "RIGHT" : "MISS") \(file) (your folder: \(chose))"]
-        if let answer {
-            lines.append("  folder: \(answer.folder) \(answer.folderConfidence)% · matched: \(judged.matchesFolder ? "yes" : "no")"
-                         + (judged.sharedWords.isEmpty ? "" : " (\(judged.sharedWords.joined(separator: ", ")))")
-                         + (answer.noteWords.isEmpty ? "" : " · note words: \(answer.noteWords)"))
-            lines.append("  what it is: \(answer.whatItIs)")
-            lines.append("  name: \(answer.name) \(answer.nameConfidence)% → \(judged.decision.proposedName ?? "unchanged")"
-                         + (judged.renameIsSure ? " (sure)" : ""))
-        } else {
-            lines.append("  folder: \(judged.namedFolderID ?? "none") · matched: \(judged.matchesFolder ? "yes" : "no")")
-        }
-        lines.append(String(format: "  %.1f s", seconds))
-        return lines.joined(separator: "\n") + "\n"
-    }
-}
-
-/// A file where Bonsai named a different folder from yours.
-struct ModelTestMiss {
-    let file: String
-    /// The folder it named, or nil for none.
-    let said: String?
-    let chose: String
-    let score: Int
-    /// What's in the file matched that folder (the safety net passed).
-    let matched: Bool
-}
-
 /// A folder you cleaned, remembered for Clean Up's button and Choose Folder's menu.
 struct RecentCleanupFolder: Codable, Equatable {
     var path: String
@@ -190,11 +134,9 @@ final class AppModel {
 
     private(set) var localModelState: LocalModelState = .notInstalled
     /// How sure the on-device model must be before EchoNyla moves or renames by itself.
-    private(set) var confidenceBar: ConfidenceBar = .standard
+    let confidenceBar = ConfidenceBar.standard
     private(set) var folderCheckProgress: String?
     private(set) var folderCheckFindings: [FolderCheckFinding] = []
-    private(set) var modelTestProgress: String?
-    private(set) var modelTestReport: ModelTestReport?
     /// The folder Bonsai is learning from its files, and how far it got.
     private(set) var learningFolderID: String?
     private(set) var folderLearnProgress: String?
@@ -319,7 +261,6 @@ final class AppModel {
     @ObservationIgnored private var localPaths: ModelPaths?
     @ObservationIgnored private var installTask: Task<Void, Never>?
     @ObservationIgnored private var folderCheckTask: Task<Void, Never>?
-    @ObservationIgnored private var modelTestTask: Task<Void, Never>?
     @ObservationIgnored private var folderLearnQueue: [String] = []
     @ObservationIgnored private var folderLearnTask: Task<Void, Never>?
     @ObservationIgnored private var reorganizeQueue: [URL] = []
@@ -332,6 +273,10 @@ final class AppModel {
     /// Where a moved file started the run, by where it is now.
     @ObservationIgnored private var reorganizeOrigins: [String: String] = [:]
     @ObservationIgnored private var reorganizeStopped = false
+    /// Files of the run that share their size with another (only these can be exact copies), and
+    /// the contents fingerprints of those done so far, with the first file's name.
+    @ObservationIgnored private var reorganizeSameSize: Set<String> = []
+    @ObservationIgnored private var reorganizeFingerprints: [String: String] = [:]
     @ObservationIgnored private var watchStates: [String: FolderWatchState] = [:]
     @ObservationIgnored private var watchTimer: Timer?
     @ObservationIgnored private var watchScopes: [URL] = []
@@ -371,7 +316,8 @@ final class AppModel {
         activity = Self.decode([ActivityEntry].self, key: Keys.activity, defaults: defaults) ?? []
         watchedFolders = Self.decode([FavoriteFolder].self, key: Keys.watchedFolders, defaults: defaults) ?? []
         loadRecentCleanupFolders()
-        confidenceBar = Self.decode(ConfidenceBar.self, key: Keys.confidenceBar, defaults: defaults) ?? .standard
+        // Test on My Files used to change the bar; it's fixed again now that the test is gone.
+        defaults.removeObject(forKey: Keys.confidenceBar)
         reorganizeFolders = Self.decode([ReorganizeFolder].self, key: Keys.reorganizeFolders, defaults: defaults) ?? []
         reorganizeSkipFolders = Self.decode([ReorganizeFolder].self, key: Keys.reorganizeSkipFolders, defaults: defaults) ?? []
         reorganizeRun = ReorganizeRun.load()
@@ -544,12 +490,12 @@ final class AppModel {
         }
         var descriptions: [String] = []
         var samples: [String] = []
+        let preparer = FilePreparer(readContents: readContents, withPicture: true)
         for (number, file) in files.enumerated() {
             if Task.isCancelled { return }
             folderLearnProgress = "Learning \(folder.name): \(number + 1) of \(files.count)…"
-            let facts = await FileInspector.facts(for: file, readContents: readContents)
-            let picture = await FileInspector.picture(for: file, readContents: readContents)
-            let question = LocalQuestion(facts: facts, picture: picture, destinations: [], locked: [])
+            let prepared = await preparer.prepare(file, next: files.indices.contains(number + 1) ? files[number + 1] : nil)
+            let question = LocalQuestion(facts: prepared.facts, picture: prepared.picture, destinations: [], locked: [])
             guard let result = try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar) else { continue }
             descriptions.append(result.answer.whatItIs)
             samples.append(result.answer.whatItIs + " " + result.answer.name)
@@ -907,29 +853,26 @@ final class AppModel {
 
     /// The model's checked answer about one file: a folder only when it's sure about one you
     /// described (and, for Bonsai, the safety net passes), a clearer name, and a summary.
-    /// Bonsai also looks at a picture of the file. `currentFolderName` is for Check This Folder.
-    /// `testing` leaves the file's own past move out of the examples, so Test on My Files can't peek at the answer.
-    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil, testing: Bool = false) async -> LocalDecision? {
-        await judgeWithAnswer(url, facts: facts, currentFolderName: currentFolderName, testing: testing)?.decision
+    /// Bonsai also looks at a picture of the file when its words don't say enough. `currentFolderName`
+    /// is for Check This Folder.
+    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil) async -> LocalDecision? {
+        let picture = usesLocalModel && PictureNeed.wanted(facts) ? await FileInspector.picture(for: url, readContents: readContents) : nil
+        let prepared = PreparedFile(facts: facts, picture: picture, captured: FileInspector.creationDate(of: url))
+        return await judge(url, prepared: prepared, currentFolderName: currentFolderName)
     }
 
-    /// `judge`, plus Bonsai's raw answer (for Test on My Files' details).
-    private func judgeWithAnswer(_ url: URL, facts: FileFacts, currentFolderName: String? = nil,
-                                 testing: Bool = false) async -> (decision: LocalDecision, answer: LocalAnswer?)? {
+    /// `judge` for a file whose facts and picture were read ahead (`FilePreparer`).
+    private func judge(_ url: URL, prepared: PreparedFile, currentFolderName: String? = nil) async -> LocalDecision? {
         guard aiReady else { return nil }
+        let facts = prepared.facts
         let locked = lockedDestinationIDs
         if usesLocalModel, let paths = localPaths {
-            let picture = await FileInspector.picture(for: url, readContents: readContents)
-            let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked,
-                                                   leavingOut: testing ? url.lastPathComponent : nil)
-            let question = LocalQuestion(facts: facts, picture: picture, destinations: destinations, locked: locked,
-                                         currentFolderName: currentFolderName, examples: examples,
-                                         captured: FileInspector.creationDate(of: url))
-            guard let result = try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar) else { return nil }
-            return (result.decision, result.answer)
+            let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked)
+            let question = LocalQuestion(facts: facts, picture: prepared.picture, destinations: destinations, locked: locked,
+                                         currentFolderName: currentFolderName, examples: examples, captured: prepared.captured)
+            return try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar).decision
         }
-        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked,
-                                               leavingOut: testing ? url.lastPathComponent : nil)
+        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked)
         let prompt = DecisionPrompt.make(facts: facts, destinations: destinations, locked: locked, examples: examples)
         guard let answer = try? await OnDeviceModel.decide(prompt) else { return nil }
         var decision = DecisionCheck.check(folder: answer.folder, confidence: answer.confidence, reason: answer.reason,
@@ -941,9 +884,8 @@ final class AppModel {
         let match = named.map { FolderMatch.check(named: $0, among: AIFolders.choosable(destinations, locked: locked), fileWords: words) }
         if match?.passes != true { decision.isConfident = false }
         // Apple Intelligence's names always wait for you.
-        let checked = LocalDecision(decision: decision, namedFolderID: decision.destinationID, folderConfidence: decision.isConfident ? 100 : 0,
-                                    matchesFolder: match?.passes ?? false, renameIsSure: false, sharedWords: match?.shared ?? [])
-        return (checked, nil)
+        return LocalDecision(decision: decision, namedFolderID: decision.destinationID, folderConfidence: decision.isConfident ? 100 : 0,
+                             matchesFolder: match?.passes ?? false, renameIsSure: false, sharedWords: match?.shared ?? [])
     }
 
     /// "What is this file?" for any file.
@@ -1171,7 +1113,6 @@ final class AppModel {
         installer.remove()
         localPaths = nil
         localModelState = .notInstalled
-        modelTestReport = nil
     }
 
     var localModelBytesOnDisk: Int64 { installer.installedBytes() }
@@ -1214,11 +1155,12 @@ final class AppModel {
             let access = folderURL.startAccessingSecurityScopedResource()
             defer { if access { folderURL.stopAccessingSecurityScopedResource() } }
             let files = looseFiles(in: folderURL, limit: 60)
+            let preparer = FilePreparer(readContents: readContents, withPicture: true)
             for (number, file) in files.enumerated() {
                 if Task.isCancelled { break }
                 folderCheckProgress = "Checking \(folder.name): \(number + 1) of \(files.count)…"
-                let facts = await FileInspector.facts(for: file, readContents: readContents)
-                guard !Task.isCancelled, let judged = await judge(file, facts: facts, currentFolderName: folder.name) else { continue }
+                let prepared = await preparer.prepare(file, next: files.indices.contains(number + 1) ? files[number + 1] : nil)
+                guard !Task.isCancelled, let judged = await judge(file, prepared: prepared, currentFolderName: folder.name) else { continue }
                 switch FolderCheck.verdict(currentFolderID: id, decision: judged) {
                 case .move(let target):
                     let detail = "Didn't fit \(folder.name). \(judged.decision.reason)"
@@ -1298,117 +1240,6 @@ final class AppModel {
         statusMessage = undone == 0 ? "Nothing in that batch could be undone." : "Undid \(undone) change\(undone == 1 ? "" : "s")."
     }
 
-    // MARK: Test on My Files
-
-    /// Runs Bonsai on files whose right folder is known (ones you moved yourself, and files already
-    /// in your described folders), then sets the bar for moving by itself from how often its sure
-    /// answers were right.
-    func runModelTest() {
-        guard modelTestTask == nil, usesLocalModel else { return }
-        modelTestReport = nil
-        modelTestTask = Task { await performModelTest() }
-    }
-
-    func cancelModelTest() {
-        modelTestTask?.cancel()
-        modelTestTask = nil
-        modelTestProgress = nil
-    }
-
-    private func performModelTest() async {
-        let described = checkableFolders
-        let describedIDs = Set(described.map(\.id))
-        var scopes: [URL] = []
-        var folderURLs: [String: URL] = [:]
-        for folder in described {
-            guard let url = resolvedURL(for: folder.id) else { continue }
-            if url.startAccessingSecurityScopedResource() { scopes.append(url) }
-            folderURLs[folder.id] = url
-        }
-        defer { for url in scopes { url.stopAccessingSecurityScopedResource() } }
-
-        // Your own moves first, then up to 4 recent files from each described folder.
-        var cases: [(url: URL, folderID: String)] = []
-        var seen: Set<String> = []
-        for entry in activity where (entry.kind == .moved || entry.kind == .learned) && !entry.isUndone {
-            guard let id = entry.destinationID, describedIDs.contains(id), fileManager.fileExists(atPath: entry.filePath),
-                  seen.insert(entry.filePath).inserted else { continue }
-            cases.append((URL(fileURLWithPath: entry.filePath), id))
-        }
-        for folder in described {
-            guard let url = folderURLs[folder.id] else { continue }
-            for file in looseFiles(in: url, limit: 4) where seen.insert(file.path).inserted {
-                cases.append((file, folder.id))
-            }
-        }
-        cases = Array(cases.prefix(30))
-
-        var trials: [ModelTrial] = []
-        var renames: [(String, String)] = []
-        var misses: [ModelTestMiss] = []
-        var details = ModelTestDetails.header(folders: described)
-        for (number, item) in cases.enumerated() {
-            if Task.isCancelled { break }
-            modelTestProgress = "Testing on your files: \(number + 1) of \(cases.count)…"
-            let started = Date()
-            let facts = await FileInspector.facts(for: item.url, readContents: readContents)
-            guard let result = await judgeWithAnswer(item.url, facts: facts, testing: true) else { continue }
-            let judged = result.decision
-            let seconds = Date().timeIntervalSince(started)
-            // The same file can sit in two of your folders; naming either one is right.
-            var copies: Set<String> = []
-            if let named = judged.namedFolderID, named != item.folderID, let namedURL = folderURLs[named],
-               folderHoldsCopy(of: item.url, in: namedURL) {
-                copies.insert(named)
-            }
-            let trial = ModelTrial(expectedFolderID: item.folderID, namedFolderID: judged.namedFolderID,
-                                   folderConfidence: judged.folderConfidence, matchesFolder: judged.matchesFolder,
-                                   seconds: seconds, copyFolderIDs: copies)
-            trials.append(trial)
-            details += ModelTestDetails.line(file: item.url.lastPathComponent, chose: destinationName(for: item.folderID) ?? "?",
-                                             judged: judged, answer: result.answer, seconds: seconds, isRight: trial.isRight)
-            if !trial.isRight, misses.count < 8 {
-                misses.append(ModelTestMiss(file: item.url.lastPathComponent,
-                                            said: judged.namedFolderID.flatMap { destinationName(for: $0) },
-                                            chose: destinationName(for: item.folderID) ?? "?",
-                                            score: judged.folderConfidence, matched: judged.matchesFolder))
-            }
-            if renames.count < 6, NameQuality.isUnhelpful(item.url.lastPathComponent), let name = judged.decision.proposedName {
-                renames.append((item.url.lastPathComponent, name))
-            }
-        }
-        modelTestProgress = nil
-        modelTestTask = nil
-        guard !Task.isCancelled, !trials.isEmpty else {
-            if trials.isEmpty { userError = "Test on My Files needs files you've moved yourself, or files in Sort-into folders." }
-            return
-        }
-        let before = confidenceBar.folder
-        if let bar = ModelTest.barAfterTest(trials) {
-            confidenceBar.folder = bar
-            persist(confidenceBar, key: Keys.confidenceBar)
-        }
-        let mixUps = ModelTest.mixUps(trials).prefix(3).map { mixUp in
-            (destinationName(for: mixUp.expectedFolderID) ?? "?", destinationName(for: mixUp.namedFolderID) ?? "?", mixUp.count)
-        }
-        modelTestReport = ModelTestReport(summary: ModelTest.summarize(trials, bar: confidenceBar.folder), barBefore: before,
-                                          barAfter: confidenceBar.folder, renames: renames, misses: misses, mixUps: Array(mixUps),
-                                          peakMemoryBytes: LlamaEngine.peakMemory(), details: details)
-    }
-
-    /// True when `folder` holds a byte-for-byte copy of `file` (under any name).
-    private func folderHoldsCopy(of file: URL, in folder: URL) -> Bool {
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        guard let size = (try? file.resourceValues(forKeys: keys))?.fileSize else { return false }
-        let others = (try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys),
-                                                           options: [.skipsHiddenFiles])) ?? []
-        return others.contains { other in
-            guard other.standardizedFileURL != file.standardizedFileURL, let values = try? other.resourceValues(forKeys: keys),
-                  values.isRegularFile == true, values.fileSize == size else { return false }
-            return fileManager.contentsEqual(atPath: file.path, andPath: other.path)
-        }
-    }
-
     // MARK: Deep Reorganize
 
     /// Adds a folder to go through, or (with `skip`) one Deep Reorganize must never touch.
@@ -1485,6 +1316,8 @@ final class AppModel {
             }.value
             reorganizeQueue = reorganizeStopped ? [] : files
             reorganizeTotal = reorganizeQueue.count
+            reorganizeSameSize = await Task.detached(priority: .utility) { Self.sharingSize(files) }.value
+            reorganizeFingerprints = [:]
             reorganizeLocations = Dictionary(files.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
             reorganizeOrigins = [:]
             await runReorganizeQueue()
@@ -1517,11 +1350,14 @@ final class AppModel {
     }
 
     private func runReorganizeQueue() async {
+        let preparer = FilePreparer(readContents: readContents, withPicture: true)
         while reorganizeStatus == .running, !reorganizeQueue.isEmpty {
             let file = reorganizeQueue.removeFirst()
             reorganizeCurrent = file.lastPathComponent
             let started = Date()
-            if fileManager.fileExists(atPath: file.path) { await reorganize(file) }
+            if fileManager.fileExists(atPath: file.path) {
+                await reorganize(file, prepared: await preparer.prepare(file, next: reorganizeQueue.first))
+            }
             reorganizeSeconds += Date().timeIntervalSince(started)
             reorganizeDone += 1
             reorganizeTimeLeft = ReorganizeTime.remaining(done: reorganizeDone, total: reorganizeTotal, elapsed: reorganizeSeconds)
@@ -1537,9 +1373,21 @@ final class AppModel {
     }
 
     /// One file: moved and renamed when sure, renamed when only the name is sure, otherwise left for you.
-    private func reorganize(_ file: URL) async {
-        let facts = await FileInspector.facts(for: file, readContents: readContents)
-        guard let judged = await judge(file, facts: facts) else {
+    /// An exact copy of a file already done isn't asked about again; it's listed with the duplicates.
+    private func reorganize(_ file: URL, prepared: PreparedFile) async {
+        if reorganizeSameSize.contains(file.path) {
+            let path = file.path
+            if let print = await Task.detached(priority: .utility, operation: { Self.fingerprint(path) }).value {
+                if let first = reorganizeFingerprints[print] {
+                    reorganizeItems.append(ReorganizeItem(url: file, summary: "",
+                                                          reason: "Same contents as “\(first)”, so it's listed with the duplicates.",
+                                                          groupText: ""))
+                    return
+                }
+                reorganizeFingerprints[print] = file.lastPathComponent
+            }
+        }
+        guard let judged = await judge(file, prepared: prepared) else {
             reorganizeItems.append(ReorganizeItem(url: file, summary: "", reason: "\(modelName) couldn't read this file.", groupText: ""))
             return
         }
@@ -1790,6 +1638,15 @@ final class AppModel {
     }
 
     /// Exact duplicates among `files`: same size first, then the same SHA-256 of the contents.
+    /// Paths among `files` whose size matches another file's.
+    nonisolated private static func sharingSize(_ files: [URL]) -> Set<String> {
+        let sized = files.compactMap { url -> (path: String, size: Int64)? in
+            guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else { return nil }
+            return (path: url.path, size: Int64(size))
+        }
+        return Set(DuplicateFinder.sameSize(sized).joined())
+    }
+
     nonisolated private static func duplicates(among files: [URL]) -> [(keep: URL, copies: [URL])] {
         var sized: [(path: String, size: Int64)] = []
         var modified: [String: Date] = [:]
