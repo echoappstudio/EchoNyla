@@ -372,7 +372,7 @@ struct IntelligenceStatus: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            Label("Apple Intelligence is on, running on this Mac only.", systemImage: "sparkles")
+            Label("\(model.modelName) is on, running on this Mac only.", systemImage: "sparkles")
                 .font(.caption)
                 .foregroundStyle(NylaStyle.brass)
         }

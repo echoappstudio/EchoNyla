@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Signs EchoNyla.app from the inside out: Sparkle's helpers, then Sparkle, then the app itself.
+# Signs EchoNyla.app from the inside out: Sparkle's helpers, then Sparkle and the model engine
+# (llama.framework), then the app itself.
 # SIGN_MODE is adhoc (the default), self-signed or developer-id; SIGN_IDENTITY is the
 # certificate's SHA-1 for the last two. Developer ID adds the hardened runtime and a timestamp,
 # which notarization needs.
@@ -52,6 +53,9 @@ codesign "${args[@]}" --preserve-metadata=entitlements "$SPARKLE_VERSION_DIR/XPC
 codesign "${args[@]}" "$SPARKLE_VERSION_DIR/Autoupdate"
 codesign "${args[@]}" "$SPARKLE_VERSION_DIR/Updater.app"
 codesign "${args[@]}" "$SPARKLE"
+LLAMA="$APP/Contents/Frameworks/llama.framework"
+test -e "$LLAMA/Versions/A/llama"
+codesign "${args[@]}" "$LLAMA"
 codesign "${args[@]}" "$APP"
 
 codesign --verify --deep --strict --verbose=2 "$APP"

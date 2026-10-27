@@ -283,7 +283,7 @@ struct IntelligenceCard: View {
         HStack(spacing: 10) {
             tile(available: available)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Apple Intelligence")
+                Text(model.usesLocalModel ? "Bonsai 2 9B" : "Apple Intelligence")
                     .font(.system(size: 12.5, weight: .semibold))
                 Text(model.aiUnavailableReason ?? "On-device, private to this Mac")
                     .font(.system(size: 10.5))
@@ -320,6 +320,7 @@ struct ActivityTab: View {
             if model.favoriteFolders.isEmpty {
                 SetupPromptCard()
             }
+            ActivityRunsCard()
             let waiting = model.openSuggestions
             if !waiting.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
@@ -443,7 +444,7 @@ struct CleanUpTab: View {
                 CleanupFolderMenu()
                 Spacer()
                 if model.cleanupFolder != nil, model.aiReady, model.cleanupProgress == nil {
-                    Button("Ask Apple Intelligence Again", systemImage: "sparkles") { model.askAIAboutCleanup() }
+                    Button("Ask \(model.modelName) Again", systemImage: "sparkles") { model.askAIAboutCleanup() }
                         .buttonStyle(.pill)
                 }
             }
@@ -490,17 +491,18 @@ struct CleanUpTab: View {
     @ViewBuilder
     private func bucketSection(_ bucket: CleanupBucket) -> some View {
         let rows = model.cleanupRows(in: bucket)
-        if !rows.isEmpty {
+        // The Sure part also shows when only sure renames are waiting, for its Approve button.
+        if !rows.isEmpty || (bucket == .sure && model.selectedSureCount > 0) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 10) {
                     SectionLabel(heading(bucket))
                     Spacer(minLength: 8)
                     if bucket == .sure {
-                        Button("Approve \(model.selectedSureCount) Sure Move\(model.selectedSureCount == 1 ? "" : "s")") { confirmSure = true }
+                        Button("Approve \(model.selectedSureCount) Sure Change\(model.selectedSureCount == 1 ? "" : "s")") { confirmSure = true }
                             .buttonStyle(.brass)
                             .disabled(model.selectedSureCount == 0)
-                            .confirmationDialog("Move the checked sure files?", isPresented: $confirmSure, titleVisibility: .visible) {
-                                Button("Move") { model.moveSelectedCleanupItems(onlySure: true) }
+                            .confirmationDialog("Make the checked sure changes?", isPresented: $confirmSure, titleVisibility: .visible) {
+                                Button("Apply") { model.moveSelectedCleanupItems(onlySure: true) }
                                 Button("Cancel", role: .cancel) {}
                             } message: {
                                 Text("Undo Last Move reverses all of it. Nothing is deleted.")
@@ -792,7 +794,7 @@ struct FoldersTab: View {
     @State private var editorRule: RuleDraft?
 
     var body: some View {
-        Page(title: "Folders & Rules", subtitle: "Where files can go, and rules that always win. Apple Intelligence only suggests folders you describe.") {
+        Page(title: "Folders & Rules", subtitle: "Where files can go, and rules that always win. The model only suggests folders you describe.") {
             GroupBox("Favorite folders") {
                 VStack(alignment: .leading, spacing: 10) {
                     if model.favoriteFolders.isEmpty {
@@ -809,6 +811,11 @@ struct FoldersTab: View {
                                 Text(folder.name)
                                     .font(.callout.weight(.medium))
                                 Spacer()
+                                if model.usesLocalModel, model.checkableFolders.contains(where: { $0.id == folder.id }) {
+                                    Button("Check This Folder") { model.checkFolder(id: folder.id) }
+                                        .buttonStyle(.borderless)
+                                        .disabled(!model.aiReady || model.folderCheckProgress != nil)
+                                }
                                 Button("Remove", role: .destructive) { model.removeFavorite(id: folder.id) }
                                     .buttonStyle(.borderless)
                             }
@@ -819,7 +826,7 @@ struct FoldersTab: View {
                             .textFieldStyle(.roundedBorder)
                             .padding(.leading, 26)
                             Caption(folder.purpose?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                                    ? "Apple Intelligence may suggest this folder for files that match the note."
+                                    ? "\(model.modelName) may suggest this folder for files that match the note."
                                     : "Drag and drop, rules and your own moves only.")
                                 .padding(.leading, 26)
                         }
@@ -834,6 +841,7 @@ struct FoldersTab: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)
             }
+            FolderCheckCard()
             GroupBox("Rules") {
                 VStack(alignment: .leading, spacing: 8) {
                     Caption("A rule matches file types, words in the name, or both, and always wins. A folder used by a rule only gets files that match one of its rules.")
@@ -948,21 +956,11 @@ struct SettingsTab: View {
         @Bindable var model = model
         Page(title: "Settings", subtitle: "How much EchoNyla does on its own, and what it watches.") {
             AppearanceSettings()
-            GroupBox("Apple Intelligence") {
-                VStack(alignment: .leading, spacing: 8) {
-                    SettingToggle("Use Apple Intelligence on this Mac", isOn: $model.aiEnabled)
-                    SettingToggle("Look inside files (PDF and document text, text and objects in images)", isOn: $model.readContents)
-                        .disabled(!model.aiEnabled)
-                    IntelligenceStatus()
-                    Caption("Only Apple's on-device model is used, never a cloud service. Long numbers such as account and card numbers are hidden from it. Everything still works with this off.")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-            }
+            ModelSettings()
             GroupBox("Moving files") {
                 VStack(alignment: .leading, spacing: 8) {
                     SettingToggle("Move files it's sure about by itself (with Undo)", isOn: $model.autoMove)
-                    Caption("Sure means: one of your rules, a macOS screenshot, a pattern from 3+ of your own moves, or Apple Intelligence certain about a folder you described and backed by what's inside the file or where it came from. Renames and new folders always wait for you.")
+                    Caption("Sure means: one of your rules, a macOS screenshot, a pattern from 3+ of your own moves, or the model certain about a folder you described and backed by what's inside the file. With Bonsai, it also has to quote the folder's note. New folders always wait for you; Bonsai's sure renames don't (see On-device model).")
                     SettingToggle("Show a notification for each automatic move or suggestion", isOn: $model.notificationsEnabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1032,7 +1030,7 @@ struct SettingsTab: View {
             }
             GroupBox("Privacy and safety") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("Files, names, contents, rules and learning stay on this Mac. EchoNyla has no analytics. The only thing it sends online is the check for a new version of itself, with GitHub.", systemImage: "lock.shield")
+                    Label("Files, names, contents, rules and learning stay on this Mac. EchoNyla has no analytics. It only goes online to check for a new version of itself (GitHub) and, if you ask, to download Bonsai (Hugging Face).", systemImage: "lock.shield")
                         .fixedSize(horizontal: false, vertical: true)
                     Label("Nothing is ever permanently deleted. Every move and rename can be undone from Activity or Undo Last Move.", systemImage: "arrow.uturn.backward.circle")
                         .fixedSize(horizontal: false, vertical: true)

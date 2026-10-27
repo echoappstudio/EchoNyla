@@ -1,6 +1,6 @@
 import Foundation
 
-public struct Destination: Codable, Equatable, Identifiable {
+public struct Destination: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public var name: String
     /// Your note on what goes in this folder. Apple Intelligence may only choose folders that have one.
