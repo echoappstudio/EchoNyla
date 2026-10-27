@@ -11,16 +11,19 @@ public struct LocalQuestion: Sendable {
     public var locked: Set<String>
     /// For Check This Folder: the folder the file is in now.
     public var currentFolderName: String?
+    /// How the person filed similar files before ("“name” → Folder").
+    public var examples: [String]
     /// When a picture was taken, for its new name's date.
     public var captured: Date?
 
     public init(facts: FileFacts, picture: RGBImage?, destinations: [Destination], locked: Set<String>,
-                currentFolderName: String? = nil, captured: Date? = nil) {
+                currentFolderName: String? = nil, examples: [String] = [], captured: Date? = nil) {
         self.facts = facts
         self.picture = picture
         self.destinations = destinations
         self.locked = locked
         self.currentFolderName = currentFolderName
+        self.examples = examples
         self.captured = captured
     }
 }
@@ -37,7 +40,7 @@ public enum LocalFileModel {
                            engine: LlamaEngine = .shared) async throws -> LocalResult {
         let allowed = AIFolders.choosable(question.destinations, locked: question.locked)
         let text = LocalPrompt.question(facts: question.facts, destinations: question.destinations, locked: question.locked,
-                                        currentFolderName: question.currentFolderName,
+                                        currentFolderName: question.currentFolderName, examples: question.examples,
                                         imageMarker: question.picture == nil ? nil : LlamaEngine.marker)
         let reply = try await engine.generate(paths: paths, prompt: LocalPrompt.conversation(question: text),
                                               image: question.picture, grammar: LocalPrompt.grammar(folderNames: allowed.map(\.name)))

@@ -152,6 +152,38 @@ final class LocalModelTests: XCTestCase {
         XCTAssertTrue(RenameGrounding.isGrounded(title: "Dog at the beach", evidence: labelled))
     }
 
+    func testNamesAreTidied() {
+        let vocabulary = ["purevopic", "Pictures and screen recordings for the Purevo app's website", "Utility bills and invoices"]
+        // File names read inside a screenshot lose their extension.
+        XCTAssertEqual(SmartName.clean("Congrats (Purevo).wav analysis", vocabulary: vocabulary), "Congrats (Purevo) analysis")
+        XCTAssertEqual(SmartName.clean("Purevo interface - Congrats (Purevo).wav", vocabulary: vocabulary), "Purevo interface - Congrats (Purevo)")
+        // Slug names become words; video tags go; one-letter misspellings of known words are fixed.
+        XCTAssertEqual(SmartName.clean("Purvo-with-hvac-1080p", vocabulary: vocabulary), "Purevo with hvac")
+        XCTAssertEqual(SmartName.clean("Pureo fan hvac", vocabulary: vocabulary), "Purevo fan hvac")
+        // Real words and plurals are left alone.
+        XCTAssertEqual(SmartName.clean("Acme Plumbing invoice", vocabulary: vocabulary), "Acme Plumbing invoice")
+        XCTAssertEqual(SmartName.clean("Water bill", vocabulary: vocabulary), "Water bill")
+        XCTAssertEqual(SmartName.clean("Purevo Audio Analysis", vocabulary: vocabulary), "Purevo Audio Analysis")
+        XCTAssertEqual(SmartName.clean("Verbyn settings - Signature skin"), "Verbyn settings - Signature skin")
+        // The checked decision uses the tidied name.
+        let facts = FileFacts(fileName: "Screenshot 2026-10-25 at 12.33.33 AM (2).png", isScreenshot: true,
+                              text: "Purevo Congrats (Purevo).wav Clean audio")
+        let answer = LocalAnswer(whatItIs: "Purevo's window with a file loaded.", name: "Purevo interface - Congrats (Purevo).wav",
+                                 nameConfidence: 90, folder: "none", noteWords: "", folderConfidence: 0)
+        let result = LocalDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
+        XCTAssertEqual(result.decision.proposedName, "2026-10-25 Purevo interface - Congrats (Purevo).png")
+        XCTAssertTrue(result.renameIsSure)
+    }
+
+    func testTheQuestionCarriesPastFilingExamples() {
+        let facts = FileFacts(fileName: "a.png")
+        let question = LocalPrompt.question(facts: facts, destinations: folders, locked: [],
+                                            examples: ["“Purevo before-after.png” → purevopic"], imageMarker: nil)
+        XCTAssertTrue(question.contains("How this person filed similar files before:\n- “Purevo before-after.png” → purevopic"))
+        XCTAssertFalse(LocalPrompt.question(facts: facts, destinations: folders, locked: [], imageMarker: nil).contains("filed similar"))
+        XCTAssertEqual(ConfidenceBar.standard.folder, 80)
+    }
+
     func testPicturesKeepTheirDateFirst() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!

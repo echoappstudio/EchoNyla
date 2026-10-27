@@ -44,6 +44,8 @@ struct ModelTestReport {
     let barAfter: Int
     /// Old name → new name, for files whose names said nothing.
     let renames: [(String, String)]
+    /// File, the folder Bonsai named (or "none"), the folder you chose.
+    let misses: [(String, String, String)]
     let peakMemoryBytes: UInt64
 }
 
@@ -737,13 +739,18 @@ final class AppModel {
     /// The model's checked answer about one file: a folder only when it's sure about one you
     /// described (and, for Bonsai, the safety net passes), a clearer name, and a summary.
     /// Bonsai also looks at a picture of the file. `currentFolderName` is for Check This Folder.
-    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil) async -> LocalDecision? {
+    /// `testing` leaves the file's own past move out of the examples, so Test on My Files can't peek at the answer.
+    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil, testing: Bool = false) async -> LocalDecision? {
         guard aiReady else { return nil }
         let locked = lockedDestinationIDs
         if usesLocalModel, let paths = localPaths {
             let picture = await FileInspector.picture(for: url, readContents: readContents)
+            let name = url.lastPathComponent.lowercased()
+            let history = testing ? learning.filter { $0.sampleName?.lowercased() != name } : learning
+            let examples = DecisionPrompt.examples(learning: history, destinations: destinations, locked: locked)
             let question = LocalQuestion(facts: facts, picture: picture, destinations: destinations, locked: locked,
-                                         currentFolderName: currentFolderName, captured: FileInspector.creationDate(of: url))
+                                         currentFolderName: currentFolderName, examples: examples,
+                                         captured: FileInspector.creationDate(of: url))
             return try? await LocalFileModel.ask(question, paths: paths, bar: confidenceBar).decision
         }
         let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked)
@@ -1156,12 +1163,17 @@ final class AppModel {
 
         var trials: [ModelTrial] = []
         var renames: [(String, String)] = []
+        var misses: [(String, String, String)] = []
         for (number, item) in cases.enumerated() {
             if Task.isCancelled { break }
             modelTestProgress = "Testing on your files: \(number + 1) of \(cases.count)…"
             let started = Date()
             let facts = await FileInspector.facts(for: item.url, readContents: readContents)
-            guard let judged = await judge(item.url, facts: facts) else { continue }
+            guard let judged = await judge(item.url, facts: facts, testing: true) else { continue }
+            if judged.namedFolderID != item.folderID, misses.count < 8 {
+                let said = judged.namedFolderID.flatMap { destinationName(for: $0) } ?? "none"
+                misses.append((item.url.lastPathComponent, said, destinationName(for: item.folderID) ?? "?"))
+            }
             trials.append(ModelTrial(expectedFolderID: item.folderID, namedFolderID: judged.namedFolderID,
                                      folderConfidence: judged.folderConfidence, quotePassed: judged.quotePassed,
                                      seconds: Date().timeIntervalSince(started)))
@@ -1181,7 +1193,8 @@ final class AppModel {
             persist(confidenceBar, key: Keys.confidenceBar)
         }
         modelTestReport = ModelTestReport(summary: ModelTest.summarize(trials, bar: confidenceBar.folder), barBefore: before,
-                                          barAfter: confidenceBar.folder, renames: renames, peakMemoryBytes: LlamaEngine.peakMemory())
+                                          barAfter: confidenceBar.folder, renames: renames, misses: misses,
+                                          peakMemoryBytes: LlamaEngine.peakMemory())
     }
 
     // MARK: Clean up a folder
