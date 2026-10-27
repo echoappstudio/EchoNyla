@@ -95,10 +95,19 @@ struct ModelTestReportView: View {
             Text("\(summary.right) of \(summary.files) files: Bonsai named the folder you chose.")
             if let accuracy = summary.sureAccuracy {
                 Text("When it was sure (\(summary.sure) files), it was right \(Int((accuracy * 100).rounded()))% of the time.")
+            } else {
+                Text("It wasn't sure enough about any of them to move them by itself.")
             }
             Text(barLine)
             Caption(String(format: "About %.1f s per file. Peak memory: %@.", summary.averageSeconds,
                            ByteCountFormatter.string(fromByteCount: Int64(report.peakMemoryBytes), countStyle: .memory)))
+            if !report.misses.isEmpty {
+                SectionLabel("Where it differed from you")
+                ForEach(Array(report.misses.enumerated()), id: \.offset) { _, miss in
+                    Caption("\(miss.0): it said \(miss.1), you chose \(miss.2)")
+                }
+                Caption("If its answer looks right, the file may be in the wrong folder. If not, the folder's note may need clearer words.")
+            }
             if !report.renames.isEmpty {
                 SectionLabel("Names it would give")
                 ForEach(Array(report.renames.enumerated()), id: \.offset) { _, pair in
