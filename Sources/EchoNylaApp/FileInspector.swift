@@ -28,6 +28,11 @@ enum FileInspector {
                               modified: values?.contentModificationDate,
                               isScreenshot: ScreenshotMetadata.isScreenCapture(at: url),
                               downloadedFrom: DownloadSource.hosts(at: url))
+        // A zip's table of contents is at its end, so even a big one is quick to read.
+        if readContents, facts.fileExtension == "zip", let size = facts.byteCount, let names = zipNames(url, size: size) {
+            facts.text = ZipListing.summary(names)
+            return facts
+        }
         guard readContents, (facts.byteCount ?? 0) <= maxBytesToRead else { return facts }
         switch facts.kind {
         case .pdf:
@@ -63,6 +68,16 @@ enum FileInspector {
             break
         }
         return facts
+    }
+
+    /// The names of the files in a zip, read from the end of the file. Nothing is unpacked.
+    static func zipNames(_ url: URL, size: Int64) -> [String]? {
+        guard size >= 22, let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let length = min(size, Int64(ZipListing.tailBytes))
+        guard (try? handle.seek(toOffset: UInt64(size - length))) != nil,
+              let data = try? handle.read(upToCount: Int(length)) else { return nil }
+        return ZipListing.names(tail: data, fileSize: size)
     }
 
     static func firstPageImage(_ document: PDFDocument) -> CGImage? {

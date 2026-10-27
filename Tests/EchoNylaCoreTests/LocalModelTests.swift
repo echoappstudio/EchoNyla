@@ -79,19 +79,58 @@ final class LocalModelTests: XCTestCase {
 
     // MARK: The safety net
 
-    func testAFolderNeedsATrueQuoteThatDescribesTheFile() {
-        let invoice = Evidence(facts: FileFacts(fileName: "scan.pdf", text: "Acme Plumbing INVOICE #2231 Apartment 4B"), description: "A plumbing invoice.")
-        let note = "Utility bills and invoices for the apartment"
-        XCTAssertTrue(NoteQuoteCheck.passes(quote: "invoices for the apartment", note: note, evidence: invoice))
-        // Words that aren't in the note are a made-up quote.
-        XCTAssertFalse(NoteQuoteCheck.passes(quote: "plumbing invoices", note: note, evidence: invoice))
-        // Only filler quoted.
-        XCTAssertFalse(NoteQuoteCheck.passes(quote: "for the", note: note, evidence: invoice))
-        // The "2 week notice" mistake: the note's words don't describe the file.
-        let notice = Evidence(facts: FileFacts(fileName: "2 week notice.pages", text: "Please accept this letter as my two weeks notice"),
-                              description: "A formal two-week resignation notice.")
-        XCTAssertFalse(NoteQuoteCheck.passes(quote: "Pictures and screen recordings for the Purevo app's website",
-                                             note: "Pictures and screen recordings for the Purevo app's website", evidence: notice))
+    func testAFolderMustMatchWhatsInTheFileBetterThanAnyOther() {
+        func words(_ text: String, _ description: String) -> Set<String> {
+            FolderMatch.fileWords(evidence: Evidence(facts: FileFacts(fileName: "x", text: text), description: description), title: "")
+        }
+        let bills = folders[1], pics = folders[0]
+        let invoice = words("Acme Plumbing INVOICE #2231 Apartment 4B", "A plumbing invoice.")
+        XCTAssertEqual(FolderMatch.check(named: bills, among: folders, fileWords: invoice),
+                       FolderMatch.Result(passes: true, shared: ["apartme", "invoice"]))
+        // The "2 week notice" mistake: nothing in a resignation letter is about Purevo's pictures.
+        let notice = words("Please accept this letter as my two weeks notice", "A formal two-week resignation notice.")
+        XCTAssertEqual(FolderMatch.check(named: pics, among: folders, fileWords: notice), FolderMatch.Result(passes: false, shared: []))
+        // Words in every screen description ("app", "window", "showing") don't count.
+        let verbyn = words("", "A screenshot of the Verbyn app window showing settings.")
+        XCTAssertFalse(FolderMatch.check(named: pics, among: folders, fileWords: verbyn).passes)
+        // One word no other folder has is enough; a long word matches a glued folder name ("purevo" in "purevopic").
+        let purevo = words("", "Purevo's waveform.")
+        XCTAssertTrue(FolderMatch.check(named: pics, among: folders, fileWords: purevo).passes)
+        XCTAssertTrue(FolderMatch.check(named: Destination(id: "p", name: "purevopic", purpose: "Shots"), among: [],
+                                        fileWords: purevo).passes)
+        // Two folders about Purevo tie: not sure, so it waits for you.
+        let newfo = Destination(id: "newfo", name: "newfo", purpose: "Purevo screenshots")
+        let tie = FolderMatch.check(named: pics, among: folders + [newfo], fileWords: purevo)
+        XCTAssertFalse(tie.passes)
+        XCTAssertEqual(tie.shared, ["purevo"])
+        // Learned words count like the note's.
+        let learned = Destination(id: "l", name: "Work", sortsInto: true, learnedWords: ["wavefor", "purevo"])
+        XCTAssertTrue(FolderMatch.check(named: learned, among: [learned, pics], fileWords: purevo).passes)
+        XCTAssertEqual(FolderMatch.spelled(["purevo", "waveform"], in: "Purevo's waveform"), ["Purevo", "waveform"])
+    }
+
+    func testFoldersLearnFromTheirFiles() {
+        let samples = ["A screenshot of Purevo's waveform view", "Purevo settings window with Clean audio", "Verbyn window"]
+        XCTAssertEqual(FolderProfile.words(samples: samples), ["purevo"])
+        XCTAssertEqual(Set(FolderProfile.words(samples: ["Acme plumbing invoice"])), ["acme", "plumbin", "invoice"])
+        XCTAssertEqual(FolderProfile.parseNote(#"{"note": "Screenshots of the Purevo app."}"#), "Screenshots of the Purevo app")
+        XCTAssertNil(FolderProfile.parseNote("nothing"))
+        let prompt = FolderProfile.notePrompt(folderName: "purevopic", descriptions: ["Purevo's waveform"])
+        XCTAssertTrue(prompt.contains("in the folder \"purevopic\":\n- Purevo's waveform\n"))
+        XCTAssertTrue(prompt.hasPrefix("<|im_start|>system\nYou describe folders"))
+        XCTAssertTrue(FolderProfile.noteGrammar.contains(#"root ::= "{" ws "\"note\":" ws note ws "}""#))
+    }
+
+    func testOnlySortIntoFoldersAreChoosable() throws {
+        let learnedOnly = Destination(id: "a", name: "A", sortsInto: true, learnedWords: ["purevo"])
+        let draggingOnly = Destination(id: "b", name: "B", purpose: "Receipts", sortsInto: false)
+        let nothingKnown = Destination(id: "c", name: "C", sortsInto: true)
+        XCTAssertEqual(AIFolders.choosable([learnedOnly, draggingOnly, nothingKnown], locked: []).map(\.id), ["a"])
+        XCTAssertEqual(AIFolders.line(learnedOnly), "- A: (no note)")
+        // Saved before 3.2.0: no sortsInto or learnedWords; a note still means "Sort into this".
+        let old = try JSONDecoder().decode(Destination.self, from: Data(#"{"id":"x","name":"Bills","purpose":"Utility bills"}"#.utf8))
+        XCTAssertTrue(old.sortsInto)
+        XCTAssertEqual(old.learnedWords, [])
     }
 
     func testTheCheckedDecision() {
@@ -102,10 +141,10 @@ final class LocalModelTests: XCTestCase {
         let result = LocalDecisionCheck.check(answer, facts: facts, destinations: folders, locked: [])
         XCTAssertEqual(result.decision.destinationID, "pics")
         XCTAssertTrue(result.decision.isConfident)
-        XCTAssertTrue(result.quotePassed)
+        XCTAssertTrue(result.matchesFolder)
         XCTAssertEqual(result.decision.proposedName, "2026-10-27 Purevo Clean audio screen.png")
         XCTAssertTrue(result.renameIsSure)
-        XCTAssertEqual(result.decision.reason, "Matches \"Purevo app's website\" in purevopic's note.")
+        XCTAssertEqual(result.decision.reason, "Matches Purevo in purevopic.")
 
         // Below the bar: still a suggestion, not a move.
         var lower = answer
@@ -117,13 +156,16 @@ final class LocalModelTests: XCTestCase {
         XCTAssertFalse(unsure.renameIsSure)
         XCTAssertEqual(unsure.decision.proposedName, "2026-10-27 Purevo Clean audio screen.png")
 
-        // A failed quote drops the folder entirely.
+        // A folder that shares nothing with the file is dropped entirely, however sure the model is.
         var wrong = answer
-        wrong.noteWords = "utility bills"
+        wrong.folder = "Bills"
+        wrong.folderConfidence = 99
         let dropped = LocalDecisionCheck.check(wrong, facts: facts, destinations: folders, locked: [])
         XCTAssertNil(dropped.decision.destinationID)
-        XCTAssertEqual(dropped.namedFolderID, "pics")
+        XCTAssertEqual(dropped.namedFolderID, "bills")
         XCTAssertFalse(dropped.decision.isConfident)
+        XCTAssertFalse(dropped.matchesFolder)
+        XCTAssertEqual(dropped.decision.reason, "No folder fits this file.")
     }
 
     // MARK: Renames
@@ -218,7 +260,7 @@ final class LocalModelTests: XCTestCase {
     // MARK: Test on My Files
 
     private func trial(_ expected: String, _ named: String?, _ score: Int, quote: Bool = true) -> ModelTrial {
-        ModelTrial(expectedFolderID: expected, namedFolderID: named, folderConfidence: score, quotePassed: quote, seconds: 2)
+        ModelTrial(expectedFolderID: expected, namedFolderID: named, folderConfidence: score, matchesFolder: quote, seconds: 2)
     }
 
     func testTheBarIsSetFromYourFiles() {
@@ -244,7 +286,7 @@ final class LocalModelTests: XCTestCase {
 
     func testCopiesCountAsRightAndTheReportSaysWhyNothingWasSure() {
         // The first real run: newfo's screenshots also sit in allsame, which Bonsai named.
-        let copy = ModelTrial(expectedFolderID: "newfo", namedFolderID: "allsame", folderConfidence: 70, quotePassed: false,
+        let copy = ModelTrial(expectedFolderID: "newfo", namedFolderID: "allsame", folderConfidence: 70, matchesFolder: false,
                               seconds: 8, copyFolderIDs: ["allsame"])
         XCTAssertTrue(copy.isRight)
         XCTAssertTrue(copy.isCopyMatch)
@@ -255,7 +297,7 @@ final class LocalModelTests: XCTestCase {
         XCTAssertEqual(summary.copies, 1)
         XCTAssertEqual(summary.sure, 0)
         XCTAssertEqual(summary.highestFolderScore, 75)
-        XCTAssertEqual(summary.unquoted, 2)
+        XCTAssertEqual(summary.unmatched, 2)
         // purevopic → allsame twice is a mix-up; the copy and the single "none" aren't.
         XCTAssertEqual(ModelTest.mixUps(trials), [FolderMixUp(expectedFolderID: "purevopic", namedFolderID: "allsame", count: 2)])
         XCTAssertNil(ModelTest.summarize([trial("a", nil, 0)], bar: 80).highestFolderScore)
@@ -266,7 +308,7 @@ final class LocalModelTests: XCTestCase {
     func testFolderCheckVerdicts() {
         func decision(_ named: String?, confident: Bool) -> LocalDecision {
             LocalDecision(decision: FileDecision(destinationID: named, isConfident: confident, reason: "", proposedName: nil, summary: ""),
-                          namedFolderID: named, folderConfidence: confident ? 95 : 50, quotePassed: named != nil, renameIsSure: false)
+                          namedFolderID: named, folderConfidence: confident ? 95 : 50, matchesFolder: named != nil, renameIsSure: false)
         }
         XCTAssertEqual(FolderCheck.verdict(currentFolderID: "a", decision: decision("a", confident: true)), .belongs)
         XCTAssertEqual(FolderCheck.verdict(currentFolderID: "a", decision: decision("b", confident: true)), .move(to: "b"))

@@ -80,13 +80,14 @@ struct ModelSettings: View {
     private var barText: String {
         let bar = model.confidenceBar.folder
         let moves = bar > 100 ? "Folder moves always ask you first (Test on My Files found its sure answers weren't reliable enough)."
-            : "It moves a file by itself when it's at least \(bar)% sure and can quote the folder's note."
+            : "It moves a file by itself when it's at least \(bar)% sure and what's in the file matches that Sort-into folder better than any other."
         return moves + " It renames by itself when it's at least \(model.confidenceBar.name)% sure, the name comes from what's in the file, and the old name said nothing (like \"Screenshot 2026-10-27 at 9.41.02\" or \"IMG_4821\"). Everything else waits for you."
     }
 }
 
 struct ModelTestReportView: View {
     let report: ModelTestReport
+    @State private var copied = false
 
     var body: some View {
         let summary = report.summary
@@ -102,7 +103,7 @@ struct ModelTestReportView: View {
                 Text("It wasn't sure enough about any of them to move them by itself.")
                 if let highest = summary.highestFolderScore {
                     Caption("Its highest folder score was \(highest)%."
-                            + (summary.unquoted > 0 ? " \(summary.unquoted) answers couldn't point to words in the folder's note." : ""))
+                            + (summary.unmatched > 0 ? " \(summary.unmatched) answers didn't match the folder well enough." : ""))
                 }
             }
             Text(barLine)
@@ -113,7 +114,7 @@ struct ModelTestReportView: View {
                 ForEach(Array(report.mixUps.enumerated()), id: \.offset) { _, mixUp in
                     Caption("\(mixUp.0) files went to \(mixUp.1) \(mixUp.2) times")
                 }
-                Caption("Their notes may say the same thing. Give each note the words that make it different, or remove a folder you don't use.")
+                Caption("Those folders hold the same kind of files. Set one to Just for dragging, give each a note that says what makes it different, or Learn Again.")
             }
             if !report.misses.isEmpty {
                 SectionLabel("Where it differed from you")
@@ -128,6 +129,16 @@ struct ModelTestReportView: View {
                     Caption("\(pair.0) → \(pair.1)")
                 }
             }
+            HStack(spacing: 8) {
+                Button("Copy Details", systemImage: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(report.details, forType: .string)
+                    copied = true
+                }
+                .buttonStyle(.pill)
+                Caption(copied ? "Copied. Paste it into your chat about EchoNyla." : "Every answer in plain text, with your file names.")
+            }
+            .padding(.top, 4)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -136,7 +147,7 @@ struct ModelTestReportView: View {
 
     private func missLine(_ miss: ModelTestMiss) -> String {
         guard let said = miss.said else { return "\(miss.file): it said none, you chose \(miss.chose)" }
-        let quote = miss.quoted ? "" : ", no words from its note"
+        let quote = miss.matched ? "" : ", didn't match the folder"
         return "\(miss.file): it said \(said) (\(miss.score)%\(quote)), you chose \(miss.chose)"
     }
 
@@ -157,7 +168,7 @@ struct FolderCheckCard: View {
                 if !model.usesLocalModel {
                     Caption("Download Bonsai in Settings → On-device model to check your folders.")
                 }
-                Caption("Bonsai looks at every file in a folder with a note. Files that clearly belong in another folder move there by themselves, and files with names that say nothing get a proper name. Anything it isn't sure about is listed here. Undo All is in Activity.")
+                Caption("Bonsai looks at every file in a Sort-into folder. Files that clearly belong in another folder move there by themselves, and files with names that say nothing get a proper name. Anything it isn't sure about is listed here. Undo All is in Activity.")
                 if let progress = model.folderCheckProgress {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)

@@ -35,7 +35,9 @@ struct SetupHelperView: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 PageTitle("Suggested folders")
-                Caption("Folders in Documents and on your Desktop that you keep files in. Tick the ones EchoNyla may file into. The notes say what goes in each; Apple Intelligence only suggests a folder for files that plainly match its note, so edit them freely.")
+                Caption(model.usesLocalModel
+                        ? "Folders in Documents and on your Desktop that you keep files in. Tick the ones to add. \"Sort into this\" folders get files from Bonsai, which learns what goes in each from the files already there. \"Just for dragging\" folders are quick places to drop things."
+                        : "Folders in Documents and on your Desktop that you keep files in. Tick the ones to add. \"Sort into this\" folders get files from Apple Intelligence when they plainly match the note, so edit the notes freely. \"Just for dragging\" folders are quick places to drop things.")
             }
             if model.isPreparingSetup {
                 HStack(spacing: 8) {
@@ -98,17 +100,33 @@ struct SetupCandidateRow: View {
                     Text("\(candidate.fileCount) files · \(candidate.url.deletingLastPathComponent().lastPathComponent)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 6) {
-                    TextField("What goes here? (optional)", text: Binding(
-                        get: { candidate.note },
-                        set: { model.setSetupNote(id: candidate.id, to: $0) }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    if candidate.isDrafting {
-                        ProgressView().controlSize(.mini)
-                            .help("Apple Intelligence is writing a note")
+                    Spacer(minLength: 6)
+                    Picker("Use", selection: Binding(
+                        get: { candidate.sortsInto },
+                        set: { model.setSetupSortsInto(id: candidate.id, $0) }
+                    )) {
+                        Text("Sort into this").tag(true)
+                        Text("Just for dragging").tag(false)
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .controlSize(.small)
+                }
+                if candidate.sortsInto && !model.usesLocalModel {
+                    HStack(spacing: 6) {
+                        TextField("What goes here? (optional)", text: Binding(
+                            get: { candidate.note },
+                            set: { model.setSetupNote(id: candidate.id, to: $0) }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        if candidate.isDrafting {
+                            ProgressView().controlSize(.mini)
+                                .help("Apple Intelligence is writing a note")
+                        }
+                    }
+                } else if candidate.sortsInto {
+                    Caption("Bonsai learns what goes here from its files after you add it.")
                 }
             }
         }
