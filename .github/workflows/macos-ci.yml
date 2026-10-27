@@ -91,6 +91,30 @@ jobs:
           fi
           echo "Info.plist's SUPublicEDKey matches the release signing key."
 
+  # The on-device model end to end: downloads Ternary Bonsai 2 9B, loads it in the embedded
+  # llama.cpp engine, shows it a screenshot and checks the structured answer, with time and peak
+  # memory. Not a required check (it depends on Hugging Face being reachable). GitHub's Mac runners
+  # may not offer the graphics chip, so it falls back to the processor; Mac timings are faster.
+  model-check:
+    name: Check the on-device model
+    if: github.event_name != 'push'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the model check
+        run: swift build -c release --product EchoNylaModelCheck
+      - name: Download the model, read a screenshot, check the answer
+        run: |
+          check=".build/release/EchoNylaModelCheck"
+          if "$check" --folder "$RUNNER_TEMP/model"; then
+            exit 0
+          fi
+          echo "With the graphics chip it didn't pass; trying the processor only."
+          "$check" --folder "$RUNNER_TEMP/model" --cpu --image-tokens 512
+
   # Publishes a release when main has a version that hasn't been released yet, from the app this
   # run just built and tested. Runs on Linux (cheaper minutes). The download is published first
   # without being marked latest, then checked logged out, then added to the update feed.

@@ -54,6 +54,21 @@ otool -L "$APP/Contents/MacOS/EchoNyla" | grep -F '@rpath/Sparkle.framework/Vers
 otool -l "$APP/Contents/MacOS/EchoNyla" | grep -F 'path @executable_path/../Frameworks'
 grep -F 'Sparkle 2.10.0' "$APP/Contents/Resources/Acknowledgements.txt"
 
+# The on-device model's engine (llama.cpp), from the exact release SwiftPM resolved and checksummed.
+# Only the Apple Silicon half is kept; EchoNyla runs on Apple Silicon only.
+LLAMA_FRAMEWORKS=()
+while IFS= read -r framework; do
+    LLAMA_FRAMEWORKS+=("$framework")
+done < <(find .build/artifacts -type d -path '*/llama.xcframework/macos-arm64_x86_64/llama.framework' -prune)
+if [[ "${#LLAMA_FRAMEWORKS[@]}" -ne 1 ]]; then
+    printf 'Expected one llama.framework in .build/artifacts, found %s.\n' "${#LLAMA_FRAMEWORKS[@]}" >&2
+    exit 1
+fi
+ditto --arch arm64 "${LLAMA_FRAMEWORKS[0]}" "$APP/Contents/Frameworks/llama.framework"
+test -s "$APP/Contents/Frameworks/llama.framework/Versions/A/llama"
+otool -L "$APP/Contents/MacOS/EchoNyla" | grep -F '@rpath/llama.framework/Versions/A/llama'
+grep -F 'llama.cpp b11800' "$APP/Contents/Resources/Acknowledgements.txt"
+
 swift Scripts/GenerateIcon.swift "$ICONSET" "Resources/AppIcon-1024.png"
 iconutil -c icns -o "$APP/Contents/Resources/AppIcon.icns" "$ICONSET"
 cp Resources/AppIcon-1024.png "$APP/Contents/Resources/AppIcon-1024.png"
@@ -139,6 +154,8 @@ test -s "$EXTRACTED_APP/Contents/Resources/SkinIcons/icon-wisteria.png"
 test -s "$EXTRACTED_APP/Contents/Resources/IntelligenceLoops.png"
 test -s "$EXTRACTED_APP/Contents/Resources/FileTypes/pdf.png"
 test -x "$EXTRACTED_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+test -s "$EXTRACTED_APP/Contents/Frameworks/llama.framework/Versions/A/llama"
+test -L "$EXTRACTED_APP/Contents/Frameworks/llama.framework/Versions/Current"
 test -L "$EXTRACTED_APP/Contents/Frameworks/Sparkle.framework/Versions/Current"
 expect_plist_in() {
     local actual

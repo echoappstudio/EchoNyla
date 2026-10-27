@@ -161,10 +161,15 @@ public struct ActivityEntry: Codable, Equatable, Identifiable, Sendable {
     public var proposedName: String?
     public var summary: String?
     public var isUndone: Bool
+    /// The batch this change belongs to (a Clean Up, a folder check, new files sorted together), for Undo All.
+    /// Nil for single changes and for everything saved before 3.1.
+    public var runID: UUID?
+    /// What the batch was, like "Checked Bills"; set on the batch's entries.
+    public var runTitle: String?
 
     public init(id: UUID = UUID(), date: Date = Date(), kind: Kind, fileName: String, detail: String, destinationID: String? = nil,
                 destinationName: String? = nil, receipt: FileMoveReceipt? = nil, filePath: String, proposedName: String? = nil,
-                summary: String? = nil, isUndone: Bool = false) {
+                summary: String? = nil, isUndone: Bool = false, runID: UUID? = nil, runTitle: String? = nil) {
         self.id = id
         self.date = date
         self.kind = kind
@@ -177,6 +182,8 @@ public struct ActivityEntry: Codable, Equatable, Identifiable, Sendable {
         self.proposedName = proposedName
         self.summary = summary
         self.isUndone = isUndone
+        self.runID = runID
+        self.runTitle = runTitle
     }
 
     /// Newest first, at most `limit` entries; a new suggestion replaces an older one for the same file.
