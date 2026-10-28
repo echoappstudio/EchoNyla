@@ -47,13 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// The tabs of the main window.
 enum MainTab: String, CaseIterable, Identifiable {
-    case activity, cleanup, reorganize, find, folders, settings
+    case activity, files, cleanup, reorganize, find, folders, settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .activity: return "Activity"
+        case .files: return "Files"
         case .cleanup: return "Clean Up"
         case .reorganize: return "Reorganize"
         case .find: return "Find"
@@ -65,6 +66,7 @@ enum MainTab: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .activity: return "clock.arrow.circlepath"
+        case .files: return "folder"
         case .cleanup: return "sparkles.rectangle.stack"
         case .reorganize: return "wand.and.stars"
         case .find: return "magnifyingglass"
@@ -203,7 +205,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     }
 
     private func makeWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 760),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 800),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "EchoNyla"
@@ -212,11 +214,11 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 840, height: 580)
+        window.minSize = NSSize(width: 1000, height: 600)
         window.appearance = NSAppearance(named: SkinStore.shared.isDark ? .darkAqua : .aqua)
         window.backgroundColor = NylaStyle.windowBackgroundNS
         window.contentViewController = NSHostingController(rootView: MainWindowView().environment(AppModel.shared))
-        window.setContentSize(NSSize(width: 920, height: 760))
+        window.setContentSize(NSSize(width: 1240, height: 800))
         window.center()
         window.delegate = self
         return window

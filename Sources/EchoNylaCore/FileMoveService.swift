@@ -30,6 +30,7 @@ public enum FileMoveError: Error, Equatable {
     case originalPathOccupied
     case invalidName
     case nameUnchanged
+    case destinationInsideSource
 }
 
 /// Performs one explicit file move and records enough information to undo it.
@@ -41,7 +42,8 @@ public struct FileMoveService {
         self.fileManager = fileManager
     }
 
-    public func move(_ sourceURL: URL, to destinationFolderURL: URL) throws -> FileMoveReceipt {
+    /// Moves a file (or, with `allowFolders`, a folder) into a folder; a number is added if the name is taken.
+    public func move(_ sourceURL: URL, to destinationFolderURL: URL, allowFolders: Bool = false) throws -> FileMoveReceipt {
         guard fileManager.fileExists(atPath: sourceURL.path) else {
             throw FileMoveError.sourceDoesNotExist
         }
@@ -49,7 +51,7 @@ public struct FileMoveService {
         guard fileManager.fileExists(atPath: sourceURL.path, isDirectory: &isDirectory) else {
             throw FileMoveError.sourceDoesNotExist
         }
-        guard !isDirectory.boolValue else {
+        guard allowFolders || !isDirectory.boolValue else {
             throw FileMoveError.sourceIsDirectory
         }
 
@@ -64,6 +66,11 @@ public struct FileMoveService {
         guard sourceParent != destinationParent else {
             throw FileMoveError.sourceAlreadyInDestination
         }
+        // A folder can't go inside itself.
+        let sourcePath = sourceURL.standardizedFileURL.path
+        guard destinationParent.path != sourcePath, !destinationParent.path.hasPrefix(sourcePath + "/") else {
+            throw FileMoveError.destinationInsideSource
+        }
 
         let targetURL = uniqueDestination(for: sourceURL, in: destinationFolderURL)
         try fileManager.moveItem(at: sourceURL, to: targetURL)
@@ -72,7 +79,7 @@ public struct FileMoveService {
 
     /// Renames a file in its own folder after you approve the new name. If the name is taken, a
     /// number is added ("Lease renewal 2.pdf"). Undo puts the old name back.
-    public func rename(_ fileURL: URL, to newName: String) throws -> FileMoveReceipt {
+    public func rename(_ fileURL: URL, to newName: String, allowFolders: Bool = false) throws -> FileMoveReceipt {
         let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains(":") else {
             throw FileMoveError.invalidName
@@ -82,11 +89,30 @@ public struct FileMoveService {
         guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) else {
             throw FileMoveError.sourceDoesNotExist
         }
-        guard !isDirectory.boolValue else { throw FileMoveError.sourceIsDirectory }
+        guard allowFolders || !isDirectory.boolValue else { throw FileMoveError.sourceIsDirectory }
         let folder = fileURL.deletingLastPathComponent()
         let target = uniqueDestination(for: folder.appendingPathComponent(name), in: folder)
         try fileManager.moveItem(at: fileURL, to: target)
         return FileMoveReceipt(originalURL: fileURL, movedURL: target)
+    }
+
+    /// A copy of a file or folder in `destinationFolderURL` (Finder's behaviour for another disk, and Paste).
+    /// A number is added if the name is taken. Returns the copy.
+    public func copy(_ sourceURL: URL, to destinationFolderURL: URL) throws -> URL {
+        guard fileManager.fileExists(atPath: sourceURL.path) else { throw FileMoveError.sourceDoesNotExist }
+        var destinationIsDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: destinationFolderURL.path, isDirectory: &destinationIsDirectory),
+              destinationIsDirectory.boolValue else {
+            throw FileMoveError.destinationIsNotDirectory
+        }
+        let sourcePath = sourceURL.standardizedFileURL.path
+        let destinationPath = destinationFolderURL.standardizedFileURL.path
+        guard destinationPath != sourcePath, !destinationPath.hasPrefix(sourcePath + "/") else {
+            throw FileMoveError.destinationInsideSource
+        }
+        let target = uniqueDestination(for: sourceURL, in: destinationFolderURL)
+        try fileManager.copyItem(at: sourceURL, to: target)
+        return target
     }
 
     public func undo(_ receipt: FileMoveReceipt) throws {

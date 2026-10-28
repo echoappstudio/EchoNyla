@@ -15,20 +15,20 @@ private final class SearchState {
     var finished = false
 }
 
-/// Runs a Spotlight query in your home folder (the index Finder search uses) and returns up to 60
-/// files, newest first.
+/// Runs a Spotlight query in your home folder (the index Finder search uses), or in one folder and
+/// the folders inside it, and returns up to `limit` files, newest first.
 @MainActor
 final class FileSearcher {
     private var query: NSMetadataQuery?
     private var observer: NSObjectProtocol?
 
-    func run(_ queryString: String) async -> [SearchResult] {
+    func run(_ queryString: String, in scope: URL? = nil, limit: Int = 60) async -> [SearchResult] {
         stop()
         guard let predicate = NSPredicate(fromMetadataQueryString: queryString) else { return [] }
         return await withCheckedContinuation { continuation in
             let query = NSMetadataQuery()
             query.predicate = predicate
-            query.searchScopes = [NSMetadataQueryUserHomeScope]
+            query.searchScopes = scope.map { [$0] } ?? [NSMetadataQueryUserHomeScope]
             query.sortDescriptors = [NSSortDescriptor(key: NSMetadataItemFSContentChangeDateKey, ascending: false)]
             let state = SearchState()
             observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { [weak self] _ in
@@ -37,7 +37,7 @@ final class FileSearcher {
                     state.finished = true
                     query.disableUpdates()
                     var results: [SearchResult] = []
-                    for index in 0..<min(query.resultCount, 60) {
+                    for index in 0..<min(query.resultCount, limit) {
                         guard let item = query.result(at: index) as? NSMetadataItem,
                               let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else { continue }
                         let url = URL(fileURLWithPath: path)

@@ -20,15 +20,38 @@ struct MainWindowView: View {
             }
             VStack(spacing: 0) {
                 TopBar(sidebarVisible: $sidebarVisible)
-                detail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                HStack(spacing: 0) {
+                    detail
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if model.previewPaneShown && model.selectedTab != .settings {
+                        Rectangle()
+                            .fill(NylaStyle.hairline)
+                            .frame(width: 1)
+                        PreviewPane()
+                            .frame(width: 300)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
             }
         }
         .animation(.easeInOut(duration: 0.22), value: sidebarVisible)
+        .animation(.easeInOut(duration: 0.22), value: model.previewPaneShown)
         .ignoresSafeArea(.container, edges: .top)
         .background(WindowBackground().ignoresSafeArea())
         .nylaChrome()
-        .frame(minWidth: 840, minHeight: 580)
+        .frame(minWidth: 1000, minHeight: 600)
+        .quickLookPreview($model.quickLookURL)
+        .onAppear {
+            FilePreviewKeys.shared.openSelected = { AppModel.shared.quickLookSelected() }
+        }
+        .onChange(of: model.selectedTab) { _, tab in
+            // Each page has its own selection; Files remembers where you were.
+            if tab == .files, let cursor = model.files.active.cursor {
+                model.select(URL(fileURLWithPath: cursor), count: max(model.files.active.selection.count, 1))
+            } else {
+                model.select(nil)
+            }
+        }
         .alert("EchoNyla", isPresented: Binding(
             get: { model.userError != nil },
             set: { if !$0 { model.userError = nil } }
@@ -44,11 +67,13 @@ struct MainWindowView: View {
         }
     }
 
-    /// The six pages. There is no toolbar or inspector, so the window never changes shape between pages.
+    /// The seven pages. There is no toolbar or inspector, so the window never changes shape between pages;
+    /// the preview pane is part of the page area, beside it.
     @ViewBuilder
     private var detail: some View {
         switch model.selectedTab {
         case .activity: ActivityTab()
+        case .files: FilesTab()
         case .cleanup: CleanUpTab()
         case .reorganize: ReorganizeTab()
         case .find: FindTab()
@@ -74,6 +99,9 @@ struct TopBar: View {
             }
             Spacer()
             WatchPill()
+            BarButton(symbol: "sidebar.right", help: model.previewPaneShown ? "Hide the preview pane" : "Show the preview pane") {
+                model.togglePreviewPane()
+            }
         }
         .padding(.leading, sidebarVisible ? 16 : 84)
         .padding(.trailing, 18)
@@ -231,7 +259,7 @@ struct BrandMark: View {
 
 struct SidebarRow: View {
     let tab: MainTab
-    /// ⌘1 to ⌘6.
+    /// ⌘1 to ⌘7.
     let number: Int
     let isSelected: Bool
     let badge: Int?
@@ -497,6 +525,7 @@ struct CleanUpTab: View {
                 Card { Caption("No loose files to review in \(model.cleanupTitle).") }
             } else {
                 summary
+                namesCard
                 bucketSection(.sure)
                 bucketSection(.guess)
                 bucketSection(.none)
@@ -602,9 +631,9 @@ struct CleanUpTab: View {
     @ViewBuilder
     private var trashSection: some View {
         if !model.trashRows.isEmpty {
-            GroupBox("Installers you can move to Trash") {
+            GroupBox("Clutter you can move to Trash") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Caption("Only .dmg files in Downloads whose app is already installed in Applications. Always unchecked; Trash can be emptied only by you.")
+                    Caption("Installers for apps already in Applications (Downloads only), exact copies of another file here (checked byte for byte), files over 500 MB, and files nobody opened or changed in a year. Always unchecked. Undo Last Move brings them back; only you can empty the Trash.")
                     ForEach(model.trashRows) { row in
                         Toggle(isOn: Binding(
                             get: { row.isSelected },
@@ -619,10 +648,11 @@ struct CleanUpTab: View {
                             }
                         }
                         .toggleStyle(.checkbox)
+                        .filePreview(row.url)
                     }
                     Button("Move Selected to Trash (\(model.selectedTrashCount))", systemImage: "trash") { confirmTrash = true }
                         .disabled(model.selectedTrashCount == 0)
-                        .confirmationDialog("Move the selected installers to Trash?", isPresented: $confirmTrash, titleVisibility: .visible) {
+                        .confirmationDialog("Move the selected files to Trash?", isPresented: $confirmTrash, titleVisibility: .visible) {
                             Button("Move to Trash", role: .destructive) { model.moveSelectedInstallersToTrash() }
                             Button("Cancel", role: .cancel) {}
                         } message: {
@@ -632,6 +662,27 @@ struct CleanUpTab: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)
             }
+        }
+    }
+
+    /// Every suggested name, old → new, so the ones it isn't sure about can be read before approving.
+    @ViewBuilder
+    private var namesCard: some View {
+        let entries = model.cleanupRows.compactMap { row in
+            row.proposedName.map { NameReviewEntry(id: row.id, url: row.url, newName: $0, isSure: row.nameIsSure, isOn: row.renameSelected) }
+        }
+        if !entries.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    SectionLabel("New names · \(entries.count)")
+                    Spacer()
+                    Caption("Checked names are applied with Approve.")
+                }
+                NameReviewList(entries: entries) { id, selected in model.setRenameSelected(entryID: id, selected: selected) }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardSurface()
         }
     }
 
@@ -1063,6 +1114,8 @@ struct SettingsTab: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SettingToggle("Move files it's sure about by itself (with Undo)", isOn: $model.autoMove)
                     Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you; sure renames of names that said nothing don't (see Apple Intelligence). This also applies to Deep Reorganize.")
+                    SettingToggle("Deep Reorganize: move exact copies to Trash by themselves", isOn: $model.trashExactCopies)
+                    Caption("Only files whose every byte is the same as another file in the run. The one with the clearest name (or the oldest) stays, and Undo All brings the copies back. Nowhere else does EchoNyla put files in the Trash by itself.")
                     SettingToggle("Show a notification for each automatic move or suggestion", isOn: $model.notificationsEnabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1136,7 +1189,7 @@ struct SettingsTab: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Label("Nothing is ever permanently deleted. Every move and rename can be undone from Activity or Undo Last Move.", systemImage: "arrow.uturn.backward.circle")
                         .fixedSize(horizontal: false, vertical: true)
-                    Label("Only .dmg installers whose app is already installed can be moved to Trash, after you confirm.", systemImage: "hand.raised")
+                    Label("Files go to the Trash only when you choose them, or when Deep Reorganize finds exact copies (checked byte for byte, with that setting on). Undo brings them back; only you can empty the Trash.", systemImage: "hand.raised")
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

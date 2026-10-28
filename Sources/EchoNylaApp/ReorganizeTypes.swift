@@ -29,6 +29,8 @@ struct ReorganizeItem: Identifiable {
     var renameSelected = false
     /// What's known about the file, for suggesting new folders.
     var groupText: String
+    /// The folder it already moved to by itself (its new name still waits for you).
+    var movedTo: String?
 }
 
 /// A new folder Deep Reorganize suggests for files that are about the same thing.
@@ -57,6 +59,8 @@ struct ReorganizeRun: Codable, Equatable {
     var started = Date()
     var moved = 0
     var renamed = 0
+    /// Exact copies it put in the Trash (nil in runs saved before 3.4).
+    var trashed: Int?
     /// Every move and rename, in the order they happened.
     var changes: [FileMoveReceipt] = []
     var createdFolders: [URL] = []
