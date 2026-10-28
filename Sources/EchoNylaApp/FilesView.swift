@@ -397,8 +397,10 @@ struct BrowserSideView: View {
                 searchBanner
             }
             Group {
-                if let error = browser.loadError {
-                    message(error, systemImage: "lock")
+                if let blocked = browser.blocked {
+                    PrivacyBlockedView(folderName: browser.folderName, privacySwitch: blocked) { browser.retryIfBlocked() }
+                } else if let error = browser.loadError {
+                    message(error, systemImage: "exclamationmark.triangle")
                 } else if browser.isLoading {
                     ProgressView()
                         .controlSize(.small)
@@ -428,6 +430,10 @@ struct BrowserSideView: View {
         }
         .simultaneousGesture(TapGesture().onEnded { area.activate(browser) })
         .onAppear { browser.loadIfNeeded() }
+        // Back from System Settings: show the folder as soon as macOS lets EchoNyla in.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            browser.retryIfBlocked()
+        }
         .onChange(of: browser.renaming) { _, path in
             renameText = path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
         }
@@ -504,6 +510,59 @@ struct BrowserSideView: View {
     static func countText(_ count: Int, selected: Int) -> String {
         let items = "\(count) item\(count == 1 ? "" : "s")"
         return selected > 0 ? "\(selected) of \(items) selected" : items
+    }
+}
+
+/// macOS keeps EchoNyla out of a folder until you allow it: which switch to turn on, a button that
+/// opens that page of System Settings, and Try Again (it also looks again when you come back).
+struct PrivacyBlockedView: View {
+    let folderName: String
+    let privacySwitch: PrivacySwitch
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 30))
+                .foregroundStyle(NylaStyle.brass)
+            Text("macOS is keeping EchoNyla out of \(folderName)")
+                .font(.system(size: 14, weight: .semibold))
+                .multilineTextAlignment(.center)
+            Text(privacySwitch.advice)
+                .font(.system(size: 12.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Open Privacy Settings", systemImage: "gearshape") { PrivacySettings.open(privacySwitch) }
+                    .buttonStyle(.brass)
+                Button("Try Again", action: retry)
+                    .buttonStyle(.pill)
+            }
+            Text("EchoNyla looks again by itself when you come back. If it still can't, quit and reopen EchoNyla.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: 380)
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+enum PrivacySettings {
+    /// Opens Privacy & Security at Files & Folders or Full Disk Access.
+    static func open(_ privacySwitch: PrivacySwitch) {
+        let anchor: String
+        switch privacySwitch {
+        case .filesAndFolders: anchor = "Privacy_FilesAndFolders"
+        case .fullDiskAccess: anchor = "Privacy_AllFiles"
+        }
+        let page = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")
+        let fallback = URL(string: "x-apple.systempreferences:com.apple.preference.security")
+        if let page, NSWorkspace.shared.open(page) { return }
+        if let fallback { NSWorkspace.shared.open(fallback) }
     }
 }
 

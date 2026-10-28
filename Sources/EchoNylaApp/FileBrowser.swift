@@ -66,6 +66,8 @@ final class FileBrowser: Identifiable {
     private(set) var items: [BrowserItem] = []
     private(set) var isLoading = false
     private(set) var loadError: String?
+    /// macOS keeps EchoNyla out of this folder; this is the switch that lets it in.
+    private(set) var blocked: PrivacySwitch?
     var selection: Set<String> = []
     /// Where a Shift-click or Shift-arrow selection starts.
     var anchor: String?
@@ -175,6 +177,7 @@ final class FileBrowser: Identifiable {
         loadTask?.cancel()
         isLoading = items.isEmpty
         loadError = nil
+        blocked = nil
         watch(path)
         loadTask = Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) { Self.list(path) }.value
@@ -191,6 +194,9 @@ final class FileBrowser: Identifiable {
             case .failure(let message):
                 items = []
                 loadError = message
+            case .blocked:
+                items = []
+                blocked = PrivacySwitch.forFolder(path, home: FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path)
             }
         }
     }
@@ -198,6 +204,8 @@ final class FileBrowser: Identifiable {
     enum ListResult: Sendable {
         case success([BrowserItem])
         case failure(String)
+        /// macOS's privacy settings keep EchoNyla out.
+        case blocked
     }
 
     nonisolated static func list(_ path: String) -> ListResult {
@@ -208,9 +216,10 @@ final class FileBrowser: Identifiable {
             let urls = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
             return .success(urls.map { item(for: $0, keys: keys) })
         } catch {
-            let code = (error as NSError).code
-            if code == NSFileReadNoPermissionError {
-                return .failure("macOS hasn't let EchoNyla look in this folder. Allow it in System Settings › Privacy & Security › Files and Folders.")
+            let nsError = error as NSError
+            let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+            if nsError.code == NSFileReadNoPermissionError || underlying?.code == Int(EPERM) || underlying?.code == Int(EACCES) {
+                return .blocked
             }
             return .failure("EchoNyla can't read this folder: \(error.localizedDescription)")
         }
@@ -297,6 +306,11 @@ final class FileBrowser: Identifiable {
             guard !Task.isCancelled else { return }
             reload()
         }
+    }
+
+    /// After a visit to System Settings: if macOS kept EchoNyla out, look again.
+    func retryIfBlocked() {
+        if blocked != nil || loadError != nil { reload() }
     }
 
     /// Stops watching (the Files area is closed or this side is hidden).

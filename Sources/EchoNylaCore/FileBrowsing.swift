@@ -522,6 +522,34 @@ public enum PathTrail {
     }
 }
 
+/// The switch in System Settings › Privacy & Security that lets EchoNyla into a folder macOS keeps it out of.
+public enum PrivacySwitch: Equatable, Sendable {
+    /// A switch under Files & Folders, like "Desktop Folder".
+    case filesAndFolders(String)
+    case fullDiskAccess
+
+    public static func forFolder(_ path: String, home: String) -> PrivacySwitch {
+        let homeClean = home.hasSuffix("/") ? String(home.dropLast()) : home
+        let places: [(String, String)] = [("Desktop", "Desktop Folder"), ("Documents", "Documents Folder"),
+                                          ("Downloads", "Downloads Folder"), ("Library/Mobile Documents", "iCloud Drive")]
+        for (folder, name) in places where PathTrail.isInside(path, homeClean + "/" + folder) {
+            return .filesAndFolders(name)
+        }
+        if path.hasPrefix("/Volumes/") { return .filesAndFolders("Removable Volumes") }
+        return .fullDiskAccess
+    }
+
+    /// What to do, in words: "Turn on Desktop Folder for EchoNyla in Files & Folders."
+    public var advice: String {
+        switch self {
+        case .filesAndFolders(let name):
+            return "Turn on “\(name)” for EchoNyla in Privacy & Security › Files & Folders."
+        case .fullDiskAccess:
+            return "Turn on EchoNyla in Privacy & Security › Full Disk Access (click + and choose it from Applications if it isn't listed)."
+        }
+    }
+}
+
 /// Selecting with the keyboard and with Shift: the run of items between where you started and where you are.
 public enum SelectionRange {
     public static func between(_ anchor: String, _ end: String, in order: [String]) -> [String] {
