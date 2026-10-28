@@ -361,11 +361,10 @@ final class FilePreviewKeys {
 /// Pictures of files for the hover card and the preview pane, from Quick Look, kept while EchoNyla runs.
 @MainActor
 enum FilePeekImages {
-    static let side: CGFloat = 260
     private static var cache: [String: NSImage] = [:]
 
     /// Nil for files Quick Look can't draw (their icon already says what they are).
-    static func image(for url: URL, side: CGFloat = side) async -> NSImage? {
+    static func image(for url: URL, side: CGFloat = 260) async -> NSImage? {
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         let key = url.path + "|" + String(modified?.timeIntervalSince1970 ?? 0) + "|" + String(Int(side))
         if let cached = cache[key] { return cached }
