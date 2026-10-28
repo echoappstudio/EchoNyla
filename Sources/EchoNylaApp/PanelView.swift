@@ -338,7 +338,7 @@ struct PendingCard: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel")
             }
-            .filePreview(pending.url)
+            .filePreview(pending.url, clickQuickLooks: true)
             if pending.isThinking {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

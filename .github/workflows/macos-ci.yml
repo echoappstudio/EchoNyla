@@ -46,7 +46,7 @@ jobs:
       - name: Build, package, and verify app bundle and ZIP
         run: bash Scripts/package-app.sh
       - name: Verify downloadable ZIP checksum sidecar
-        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.3.1.zip
+        run: python3 Scripts/test_checksum_sidecar.py dist/EchoNyla-3.4.0.zip
       - name: Launch app smoke test
         run: bash Scripts/smoke-test.sh
       - name: Put a skin icon on the app in Finder and take it off
@@ -62,8 +62,8 @@ jobs:
         with:
           name: EchoNyla-${{ github.run_number }}
           path: |
-            dist/EchoNyla-3.3.1.zip
-            dist/EchoNyla-3.3.1.zip.sha256
+            dist/EchoNyla-3.4.0.zip
+            dist/EchoNyla-3.4.0.zip.sha256
             dist/signing.txt
           if-no-files-found: error
           retention-days: 30

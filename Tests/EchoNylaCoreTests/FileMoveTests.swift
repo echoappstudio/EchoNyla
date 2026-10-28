@@ -57,6 +57,37 @@ final class FileMoveTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: original, encoding: .utf8), "replacement")
     }
 
+    func testFilesAreaMovesRenamesAndCopiesFolders() throws {
+        let box = try makeSandbox()
+        let folder = box.source.appendingPathComponent("Trip", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("ticket".utf8).write(to: folder.appendingPathComponent("ticket.pdf"))
+        let mover = FileMoveService()
+
+        let moved = try mover.move(folder, to: box.destination, allowFolders: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: moved.movedURL.appendingPathComponent("ticket.pdf").path))
+        // A folder can't go inside itself.
+        let inner = moved.movedURL.appendingPathComponent("Inner", isDirectory: true)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try mover.move(moved.movedURL, to: inner, allowFolders: true)) { error in
+            XCTAssertEqual(error as? FileMoveError, .destinationInsideSource)
+        }
+        let renamed = try mover.rename(moved.movedURL, to: "Trip 2026", allowFolders: true)
+        XCTAssertEqual(renamed.movedURL.lastPathComponent, "Trip 2026")
+        XCTAssertThrowsError(try mover.rename(renamed.movedURL, to: "Other"), "Folders only with allowFolders")
+
+        let copy = try mover.copy(renamed.movedURL, to: box.source)
+        XCTAssertEqual(copy.lastPathComponent, "Trip 2026")
+        let second = try mover.copy(renamed.movedURL, to: box.source)
+        XCTAssertEqual(second.lastPathComponent, "Trip 2026 2")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.movedURL.path), "Copying leaves the original")
+        XCTAssertThrowsError(try mover.copy(renamed.movedURL, to: renamed.movedURL.appendingPathComponent("Inner")))
+
+        try mover.undo(renamed)
+        try mover.undo(moved)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("ticket.pdf").path))
+    }
+
     func testUndoBatchRestoresFilesAndRemovesCreatedFolderWhenEmpty() throws {
         let box = try makeSandbox()
         let cleanup = box.source

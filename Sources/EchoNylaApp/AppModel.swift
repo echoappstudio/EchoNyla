@@ -96,7 +96,9 @@ struct PendingFile {
 final class AppModel {
     static let shared = AppModel()
 
-    private(set) var favoriteFolders: [FavoriteFolder] = []
+    var favoriteFolders: [FavoriteFolder] = [] {
+        didSet { favoriteURLCache = nil }
+    }
     private(set) var rules: [DestinationRule] = []
     private(set) var learning: [LearningRecord] = []
     var pending: PendingFile?
@@ -226,12 +228,17 @@ final class AppModel {
         static let confidenceBar = "EchoNyla.ai.bar.v1"
         static let reorganizeFolders = "EchoNyla.reorganize.folders.v1"
         static let reorganizeSkipFolders = "EchoNyla.reorganize.skip.v1"
+        static let previewPane = "EchoNyla.previewPane.shown.v1"
+        static let trashExactCopies = "EchoNyla.reorganize.trashCopies.v1"
+        static let filesSort = "EchoNyla.files.sort.v1"
+        static let filesGrouping = "EchoNyla.files.grouping.v1"
+        static let filesViewMode = "EchoNyla.files.viewMode.v1"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let folderGroupingSettings: FolderGroupingSettings
-    @ObservationIgnored private let fileManager = FileManager.default
-    @ObservationIgnored private let mover = FileMoveService()
+    @ObservationIgnored let fileManager = FileManager.default
+    @ObservationIgnored let mover = FileMoveService()
     @ObservationIgnored private var cleanupScopeURL: URL?
     @ObservationIgnored private var cleanupScopeIsActive = false
     @ObservationIgnored private var recentCleanupRecords: [RecentCleanupFolder] = []
@@ -263,12 +270,50 @@ final class AppModel {
     /// The batch the queued files belong to (several files dropped at once), for Undo All.
     @ObservationIgnored private var queueRun: (id: UUID, title: String)?
     /// Files EchoNyla put back or renamed itself; watching never acts on them again.
-    @ObservationIgnored private var handledPaths: Set<String> = []
+    @ObservationIgnored var handledPaths: Set<String> = []
     /// Where files EchoNyla itself moved or renamed came from, so their leaving a watched folder is
     /// never mistaken for a move you made in Finder.
-    @ObservationIgnored private var appMovedPaths: Set<String> = []
+    @ObservationIgnored var appMovedPaths: Set<String> = []
     @ObservationIgnored private var tidyTimer: Timer?
     @ObservationIgnored private let searcher = FileSearcher()
+
+    // MARK: Files area and preview pane (set in AppModel+Files.swift)
+
+    /// The file in the preview pane: the one you clicked last.
+    var previewURL: URL?
+    /// How many files are selected in the Files area; the pane says so when it's more than one.
+    var previewSelectionCount = 1
+    /// Quick Look for the selected file (Space, or the pane's Quick Look button).
+    var quickLookURL: URL?
+    var previewPaneShown: Bool {
+        didSet { defaults.set(previewPaneShown, forKey: Keys.previewPane) }
+    }
+    /// What was read from inside the file in the preview pane, and whether Apple Intelligence is still at it.
+    var paneFacts: FileFacts?
+    var paneFactsPath: String?
+    var paneReading = false
+    var paneAsking = false
+    /// Changes whenever something is learned about a file, so lists and the pane show it.
+    var insightsVersion = 0
+    @ObservationIgnored var insights = FileInsights.load()
+    @ObservationIgnored var insightsUnsaved = 0
+    @ObservationIgnored var insightsSaveTask: Task<Void, Never>?
+    @ObservationIgnored var paneTask: Task<Void, Never>?
+    /// Every move, rename and trip to the Trash, for each file's history.
+    var historyVersion = 0
+    @ObservationIgnored var history = FileHistory.load()
+    @ObservationIgnored var historySaveTask: Task<Void, Never>?
+    /// A short note at the top of the Files area ("Moved 3 files to Receipts"), with Undo.
+    var filesNote: FilesNote?
+    @ObservationIgnored var filesNoteTask: Task<Void, Never>?
+    /// The two sides of the Files area; they keep their place while you visit other pages.
+    @ObservationIgnored let files = FilesArea()
+    /// Favorite folders' places on disk, worked out once per change of favorites.
+    @ObservationIgnored var favoriteURLCache: [String: URL]?
+    /// Deep Reorganize moves exact copies (checked byte for byte) to Trash by itself. On unless you turn it off.
+    var trashExactCopies: Bool {
+        didSet { defaults.set(trashExactCopies, forKey: Keys.trashExactCopies) }
+    }
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -283,6 +328,8 @@ final class AppModel {
         storedWatchDesktop = flag(Keys.watchDesktop)
         storedAIGroups = defaults.object(forKey: Keys.aiGroups) as? Bool ?? false
         storedTidyReminder = flag(Keys.tidyReminder)
+        previewPaneShown = flag(Keys.previewPane)
+        trashExactCopies = flag(Keys.trashExactCopies)
         renamePendingFirst = defaults.bool(forKey: Keys.renameFirst)
         minimumRelatedFileCount = groupingSettings.minimumRelatedFiles
         favoriteFolders = Self.decode([FavoriteFolder].self, key: Keys.folders, defaults: defaults) ?? []
@@ -725,7 +772,8 @@ final class AppModel {
         }
     }
 
-    private func markUndone(receipts: [FileMoveReceipt]) {
+    func markUndone(receipts: [FileMoveReceipt]) {
+        historyUndone(receipts)
         let movedPaths = Set(receipts.map { $0.movedURL.path })
         for index in activity.indices {
             guard let receipt = activity[index].receipt else { continue }
@@ -824,9 +872,10 @@ final class AppModel {
         persist(activity, key: Keys.activity)
     }
 
-    private func addActivity(_ entry: ActivityEntry) {
+    func addActivity(_ entry: ActivityEntry) {
         activity = ActivityEntry.adding(entry, to: activity)
         persist(activity, key: Keys.activity)
+        if let receipt = entry.receipt { recordHistory(receipt) }
     }
 
     // MARK: Apple Intelligence
@@ -859,7 +908,7 @@ final class AppModel {
     /// Apple Intelligence's checked answer about one file: a folder only when it's sure about one you
     /// described and the safety net passes, a clearer name, and a summary. On macOS 27 it also looks
     /// at a picture of the file when its words don't say enough. `currentFolderName` is for Check This Folder.
-    private func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil) async -> ModelDecision? {
+    func judge(_ url: URL, facts: FileFacts, currentFolderName: String? = nil) async -> ModelDecision? {
         let picture = OnDeviceModel.seesPictures && PictureNeed.wanted(facts) ? await FileInspector.picture(for: url, readContents: readContents) : nil
         let prepared = PreparedFile(facts: facts, picture: picture, captured: FileInspector.creationDate(of: url))
         return await judge(url, prepared: prepared, currentFolderName: currentFolderName)
@@ -875,8 +924,10 @@ final class AppModel {
                                                   folderNames: AIFolders.choosable(destinations, locked: locked).map(\.name),
                                                   currentFolderName: currentFolderName, examples: examples)
         guard let answer = try? await OnDeviceModel.ask(question) else { return nil }
-        return ModelDecisionCheck.check(answer, facts: facts, destinations: destinations, locked: locked, bar: confidenceBar,
-                                        captured: prepared.captured)
+        let checked = ModelDecisionCheck.check(answer, facts: facts, destinations: destinations, locked: locked, bar: confidenceBar,
+                                               captured: prepared.captured)
+        rememberInsight(checked, facts: facts, url: url)
+        return checked
     }
 
     /// The rules and the folders: the same for every file until a folder changes.
@@ -1184,7 +1235,7 @@ final class AppModel {
     @ObservationIgnored private var reviewedUnsaved = 0
     private(set) var reviewedCount = 0
 
-    private func reviewKey(_ url: URL) -> String? {
+    func reviewKey(_ url: URL) -> String? {
         guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
         return ReviewedFiles.key(path: url.standardizedFileURL.path, size: Int64(values.fileSize ?? 0),
                                  modified: values.contentModificationDate ?? .distantPast)
@@ -1194,7 +1245,7 @@ final class AppModel {
         reviewKey(url).map { reviewedFiles.contains($0) } ?? false
     }
 
-    private func markReviewed(_ url: URL) {
+    func markReviewed(_ url: URL) {
         guard let key = reviewKey(url) else { return }
         reviewedFiles.insert(key)
         reviewedCount = reviewedFiles.count
@@ -1202,7 +1253,7 @@ final class AppModel {
         if reviewedUnsaved >= 20 { saveReviewedFiles() }
     }
 
-    private func saveReviewedFiles() {
+    func saveReviewedFiles() {
         reviewedFiles.save()
         reviewedUnsaved = 0
     }
@@ -1412,7 +1463,16 @@ final class AppModel {
            let moved = reorganizeMove(current, into: folder) {
             current = moved
             if judged.renamesByItself, let name = decision.proposedName, let newURL = reorganizeRename(current, to: name) {
-                current = newURL
+                markReviewed(newURL)
+                return
+            }
+            if let name = decision.proposedName, name != current.lastPathComponent {
+                // It moved by itself, but its new name waits for you, so you can see it and approve it.
+                let folderName = destinationName(for: id) ?? folder.lastPathComponent
+                reorganizeItems.append(ReorganizeItem(url: current, proposedName: name, nameIsSure: judged.nameIsSure,
+                                                      summary: decision.summary, reason: "Moved to \(folderName) by itself.",
+                                                      renameSelected: judged.nameIsSure, groupText: "", movedTo: folderName))
+                return
             }
             markReviewed(current)
             return
@@ -1452,7 +1512,8 @@ final class AppModel {
         return receipt.movedURL
     }
 
-    private func recordReorganize(_ receipt: FileMoveReceipt, renamed: Bool) {
+    private func recordReorganize(_ receipt: FileMoveReceipt, renamed: Bool, trashed: Bool = false) {
+        recordHistory(receipt)
         handledPaths.insert(receipt.movedURL.path)
         appMovedPaths.insert(receipt.originalURL.path)
         let origin = reorganizeOrigins[receipt.originalURL.path] ?? receipt.originalURL.path
@@ -1460,9 +1521,27 @@ final class AppModel {
         reorganizeOrigins[receipt.movedURL.path] = origin
         if reorganizeRun == nil || reorganizeRun?.isUndone == true { reorganizeRun = ReorganizeRun() }
         reorganizeRun?.changes.append(receipt)
-        if renamed { reorganizeRun?.renamed += 1 } else { reorganizeRun?.moved += 1 }
+        if trashed {
+            reorganizeRun?.trashed = (reorganizeRun?.trashed ?? 0) + 1
+        } else if renamed {
+            reorganizeRun?.renamed += 1
+        } else {
+            reorganizeRun?.moved += 1
+        }
         reorganizeUnsaved += 1
         if reorganizeUnsaved >= 20 { saveReorganizeRun() }
+    }
+
+    /// Puts an exact copy in the Trash as part of the run, so Undo All brings it back. Checked byte
+    /// for byte against the file that's kept, right before.
+    private func reorganizeTrash(_ copy: URL, keeping keep: URL) -> Bool {
+        guard fileManager.fileExists(atPath: copy.path), fileManager.fileExists(atPath: keep.path), ExactCopy.same(keep, copy) else { return false }
+        var result: NSURL?
+        appMovedPaths.insert(copy.path)
+        guard (try? withAccess(to: copy.deletingLastPathComponent(), { try fileManager.trashItem(at: copy, resultingItemURL: &result) })) != nil,
+              let trashed = result as URL? else { return false }
+        recordReorganize(FileMoveReceipt(originalURL: copy, movedURL: trashed), renamed: false, trashed: true)
+        return true
     }
 
     private func saveReorganizeRun() {
@@ -1482,14 +1561,32 @@ final class AppModel {
                                    learnedWords: FolderProfile.words(samples: members.map(\.groupText)))
         }
         let locations = Array(reorganizeLocations.values)
-        let found = await Task.detached(priority: .utility) { Self.duplicates(among: locations) }.value
-        reorganizeDuplicates = found.map { ReorganizeDuplicate(keep: $0.keep, copies: $0.copies) }
+        let found = await Task.detached(priority: .utility) { () -> [(keep: URL, copies: [URL])] in
+            // A matching fingerprint is only a reason to look: every byte is compared before a file counts as a copy.
+            Self.duplicates(among: locations).compactMap { group in
+                let copies = group.copies.filter { ExactCopy.same(group.keep, $0) }
+                return copies.isEmpty ? nil : (keep: group.keep, copies: copies)
+            }
+        }.value
+        if trashExactCopies {
+            var gone: Set<String> = []
+            for group in found {
+                for copy in group.copies where reorganizeTrash(copy, keeping: group.keep) { gone.insert(copy.path) }
+            }
+            reorganizeItems.removeAll { gone.contains($0.id) }
+            reorganizeDuplicates = []
+        } else {
+            reorganizeDuplicates = found.map { ReorganizeDuplicate(keep: $0.keep, copies: $0.copies) }
+        }
         reorganizeCurrent = nil
         reorganizeTimeLeft = nil
         reorganizeStatus = .finished
         saveReorganizeRun()
         let run = reorganizeRun
-        statusMessage = "Deep Reorganize: moved \(run?.moved ?? 0), renamed \(run?.renamed ?? 0); \(reorganizeItems.count) waiting for you."
+        let trashed = run?.trashed ?? 0
+        statusMessage = "Deep Reorganize: moved \(run?.moved ?? 0), renamed \(run?.renamed ?? 0)"
+            + (trashed > 0 ? ", put \(trashed) exact cop\(trashed == 1 ? "y" : "ies") in the Trash" : "")
+            + "; \(reorganizeItems.count) waiting for you."
     }
 
     func setReorganizeMove(_ id: String, _ selected: Bool) {
@@ -1619,24 +1716,19 @@ final class AppModel {
         reorganizeGroups.removeAll(where: \.isSelected)
         persist(favoriteFolders, key: Keys.folders)
 
-        let base = reorganizeFolders.first.flatMap { resolveBookmark($0.bookmarkData).url }
+        var trashed = 0
         for duplicate in reorganizeDuplicates where duplicate.isSelected {
-            guard let base else { break }
-            do {
-                let (folder, created) = try withAccess(to: base) { try createOrFindFolder(named: "Duplicates", in: base) }
-                if created { reorganizeRun?.createdFolders.append(folder) }
-                for copy in duplicate.copies where fileManager.fileExists(atPath: copy.path) && reorganizeMove(copy, into: folder) != nil {
-                    moved += 1
-                }
-            } catch {
-                userError = "Could not make the Duplicates folder: \(error.localizedDescription)"
+            for copy in duplicate.copies where reorganizeTrash(copy, keeping: duplicate.keep) {
+                trashed += 1
+                done.insert(copy.path)
             }
         }
+        reorganizeItems.removeAll { done.contains($0.id) }
         reorganizeDuplicates.removeAll(where: \.isSelected)
         saveReorganizeRun()
         saveReviewedFiles()
         if aiReady { for id in newFavorites { learnFolder(id: id) } }
-        statusMessage = "Moved \(moved), renamed \(renamed). Undo All puts the whole run back."
+        statusMessage = "Moved \(moved), renamed \(renamed)" + (trashed > 0 ? ", put \(trashed) in the Trash" : "") + ". Undo All puts the whole run back."
     }
 
     /// Puts back every move and rename of the latest run, newest first. Folders it made go if
@@ -1649,6 +1741,7 @@ final class AppModel {
             do {
                 try mover.undo(receipt)
                 handledPaths.insert(receipt.originalURL.path)
+                historyUndone([receipt])
                 undone += 1
             } catch {
                 failed += 1
@@ -1920,27 +2013,44 @@ final class AppModel {
         statusMessage = parts.isEmpty ? "Nothing was changed." : parts.joined(separator: ", ") + ". Undo Last Move reverses all of it."
     }
 
-    /// The only app path that sends an item to Trash. The UI calls it only after an explicit, separate confirmation.
+    /// Clean Up's clutter goes to the Trash only after an explicit, separate confirmation. Undo Last Move brings it back.
     func moveSelectedInstallersToTrash() {
-        var trashedCount = 0
-        var receipts: [FileMoveReceipt] = []
-        for entry in trashRows where entry.isSelected {
-            var result: NSURL?
-            let sourceScope = entry.url.startAccessingSecurityScopedResource()
-            do {
-                defer { if sourceScope { entry.url.stopAccessingSecurityScopedResource() } }
-                appMovedPaths.insert(entry.url.path)
-                try fileManager.trashItem(at: entry.url, resultingItemURL: &result)
-                let movedURL = (result as URL?) ?? entry.url
-                receipts.append(FileMoveReceipt(originalURL: entry.url, movedURL: movedURL))
-                trashedCount += 1
-            } catch {
-                userError = "Could not move \(entry.url.lastPathComponent) to Trash: \(error.localizedDescription)"
+        let urls = trashRows.filter(\.isSelected).map(\.url)
+        trashItems(urls, detail: "Moved to Trash from Clean Up")
+        if let cleanupFolder { beginCleanup(at: cleanupFolder, askAI: false) }
+        statusMessage = urls.isEmpty ? "Nothing was moved to Trash." : "Moved \(Self.count(urls.count, "file")) to Trash. Undo Last Move brings them back."
+    }
+
+    /// Clutter in a folder you clean up: files over 500 MB, files nobody opened or changed in a year, and
+    /// (found in the background, checked byte for byte) exact copies of another file there. Always unchecked.
+    private func findCleanupClutter(in folder: URL) {
+        let listed = Set(trashRows.map(\.id))
+        for row in cleanupRows where !listed.contains(row.id) {
+            let item = FileBrowser.item(for: row.url)
+            let flags = ClutterCheck.flags(item, isCopy: false, isUsedInstaller: false)
+            if flags.contains(.large) {
+                trashRows.append(TrashEntry(url: row.url, reason: "Large: \(ByteText.text(item.byteCount ?? 0))", isSelected: false))
+            } else if flags.contains(.untouched) {
+                trashRows.append(TrashEntry(url: row.url, reason: "Nobody opened or changed it in over a year", isSelected: false))
             }
         }
-        if !receipts.isEmpty { saveLastMove(MoveBatchReceipt(moves: receipts)) }
-        if let cleanupFolder { beginCleanup(at: cleanupFolder, askAI: false) }
-        statusMessage = trashedCount == 0 ? "No installers were moved to Trash." : "Moved \(trashedCount) installer(s) to Trash."
+        let files = cleanupRows.map(\.url)
+        Task { @MainActor in
+            let groups = await Task.detached(priority: .utility) { ExactCopy.groups(files) }.value
+            guard cleanupFolder?.standardizedFileURL == folder.standardizedFileURL else { return }
+            for group in groups {
+                let modified = Dictionary(uniqueKeysWithValues: group.map {
+                    ($0.path, (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast)
+                })
+                guard let keep = DuplicateFinder.keeper(group.map(\.path), modified: modified) else { continue }
+                let keepName = URL(fileURLWithPath: keep).lastPathComponent
+                for copy in group where copy.path != keep {
+                    trashRows.removeAll { $0.id == copy.path }
+                    trashRows.append(TrashEntry(url: copy, reason: "Exact copy of “\(keepName)” (checked byte for byte)", isSelected: false))
+                }
+            }
+            trashRows.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
+        }
     }
 
     private func beginCleanup(at folder: URL, askAI: Bool = true) {
@@ -2003,6 +2113,7 @@ final class AppModel {
                 ))
             }
             cleanupRows.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
+            findCleanupClutter(in: folder)
             trashRows.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
             refreshFolderGroups()
             if askAI, aiReady, !cleanupRows.isEmpty { askAIAboutCleanup() }
@@ -2279,12 +2390,12 @@ final class AppModel {
     // MARK: Helpers
 
     /// A bookmark that keeps working after the folder is renamed or moved.
-    private func makeBookmark(_ url: URL) -> Data? {
+    func makeBookmark(_ url: URL) -> Data? {
         (try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil))
             ?? (try? url.bookmarkData())
     }
 
-    private func installedApplications(in folder: URL) -> [URL] {
+    func installedApplications(in folder: URL) -> [URL] {
         guard let contents = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
             return []
         }
@@ -2295,7 +2406,7 @@ final class AppModel {
         }
     }
 
-    private func chooseFolder(title: String, prompt: String) -> URL? {
+    func chooseFolder(title: String, prompt: String) -> URL? {
         let panel = NSOpenPanel()
         panel.title = title
         panel.prompt = prompt
@@ -2308,7 +2419,7 @@ final class AppModel {
         return panel.url
     }
 
-    private func createOrFindFolder(named name: String, in parent: URL) throws -> (URL, Bool) {
+    func createOrFindFolder(named name: String, in parent: URL) throws -> (URL, Bool) {
         var candidate = parent.appendingPathComponent(name, isDirectory: true)
         if fileManager.fileExists(atPath: candidate.path) {
             var isDirectory: ObjCBool = false
@@ -2323,7 +2434,7 @@ final class AppModel {
         return (candidate, true)
     }
 
-    private func validFolderName(_ value: String) -> String? {
+    func validFolderName(_ value: String) -> String? {
         let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name != ".", name != "..",
               !name.contains("/"), !name.contains("\\"), !name.contains(":") else { return nil }
@@ -2335,7 +2446,7 @@ final class AppModel {
         try? fileManager.removeItem(at: url)
     }
 
-    private func withAccess<T>(to url: URL, _ work: () throws -> T) rethrows -> T {
+    func withAccess<T>(to url: URL, _ work: () throws -> T) rethrows -> T {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         return try work()
@@ -2352,7 +2463,7 @@ final class AppModel {
         return try mover.move(source, to: destination)
     }
 
-    private func remember(fileName: String, destinationID: String) {
+    func remember(fileName: String, destinationID: String) {
         let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
         let tokens = SuggestionEngine.filenameTokens(fileName)
         let entry = LearningRecord(fileExtension: ext, tokens: tokens, destinationID: destinationID, sampleName: fileName)
@@ -2364,7 +2475,7 @@ final class AppModel {
         persist(learning, key: Keys.learning)
     }
 
-    private func saveLastMove(_ receipt: MoveBatchReceipt?) {
+    func saveLastMove(_ receipt: MoveBatchReceipt?) {
         lastMove = receipt
         guard let receipt else {
             defaults.removeObject(forKey: Keys.lastMove)
@@ -2405,7 +2516,7 @@ final class AppModel {
         persist(recentCleanupRecords, key: Keys.recentCleanupFolders)
     }
 
-    private func resolve(_ folder: FavoriteFolder) -> URL? {
+    func resolve(_ folder: FavoriteFolder) -> URL? {
         resolveBookmark(folder.bookmarkData).url
     }
 
@@ -2420,7 +2531,7 @@ final class AppModel {
         return (url, stale)
     }
 
-    private func resolvedURL(for id: String) -> URL? {
+    func resolvedURL(for id: String) -> URL? {
         guard let index = favoriteFolders.firstIndex(where: { $0.id == id }) else { return nil }
         let folder = favoriteFolders[index]
         let (resolved, stale) = resolveBookmark(folder.bookmarkData)
@@ -2432,7 +2543,7 @@ final class AppModel {
         return url
     }
 
-    private func persist<T: Encodable>(_ value: T, key: String) {
+    func persist<T: Encodable>(_ value: T, key: String) {
         guard let data = try? JSONEncoder().encode(value) else { return }
         defaults.set(data, forKey: key)
     }

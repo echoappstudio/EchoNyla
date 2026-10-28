@@ -405,7 +405,7 @@ struct ActivityRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardSurface(radius: 13, hovering: hovering)
         .opacity(entry.isUndone ? 0.6 : 1)
-        .filePreview(fileURL, highlights: false)
+        .filePreview(fileURL, highlights: false, clickQuickLooks: compact)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }

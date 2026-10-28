@@ -18,6 +18,7 @@ struct ReorganizeTab: View {
             ReorganizeFoldersCard(skip: false)
             ReorganizeFoldersCard(skip: true)
             targetsNote
+            copiesSetting
             controls
             if let run = model.reorganizeRun, run.hasChanges {
                 lastRun(run)
@@ -33,6 +34,14 @@ struct ReorganizeTab: View {
             Caption("No Sort-into folders yet, so it can only rename files and suggest new folders. Set some up in Folders & Rules.")
         } else {
             Caption("Files go into your Sort-into folders: \(targets.joined(separator: ", ")). Those folders' own files are left alone.")
+        }
+    }
+
+    private var copiesSetting: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 4) {
+            SettingToggle("Move exact copies to Trash by themselves", isOn: $model.trashExactCopies)
+            Caption("Only files whose every byte is the same as another file it went through. The one with the clearest name (or the oldest) stays. Undo All brings the copies back. This only happens in Deep Reorganize.")
         }
     }
 
@@ -110,7 +119,8 @@ struct ReorganizeTab: View {
             Image(systemName: "checkmark.circle")
                 .foregroundStyle(NylaStyle.brass)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Last run: moved \(run.moved), renamed \(run.renamed)")
+                Text("Last run: moved \(run.moved), renamed \(run.renamed)"
+                     + ((run.trashed ?? 0) > 0 ? ", \(run.trashed ?? 0) exact cop\((run.trashed ?? 0) == 1 ? "y" : "ies") to Trash" : ""))
                     .font(.callout.weight(.medium))
                 Caption("Started \(run.started.formatted(date: .abbreviated, time: .shortened)).")
             }
@@ -187,16 +197,19 @@ struct ReorganizeResults: View {
     @Binding var confirmApply: Bool
     @State private var confirmSureNames = false
     @State private var confirmUnsureNames = false
+    @State private var showNames = true
     /// The list stays quick with hundreds of files; the rest show after these are handled.
     private let shown = 150
 
     var body: some View {
         let ideas = model.reorganizeItems.filter { $0.destinationID != nil }
-        let others = model.reorganizeItems.filter { $0.destinationID == nil }
+        let moved = model.reorganizeItems.filter { $0.destinationID == nil && $0.movedTo != nil }
+        let others = model.reorganizeItems.filter { $0.destinationID == nil && $0.movedTo == nil }
         if !model.reorganizeItems.isEmpty || !model.reorganizeGroups.isEmpty || !model.reorganizeDuplicates.isEmpty {
             VStack(alignment: .leading, spacing: 16) {
                 namesBar
                 if !ideas.isEmpty { itemSection("Might belong in a folder · \(ideas.count)", items: ideas) }
+                if !moved.isEmpty { itemSection("Moved by itself, new name waiting · \(moved.count)", items: moved) }
                 if !model.reorganizeGroups.isEmpty { groupsSection }
                 if !model.reorganizeDuplicates.isEmpty { duplicatesSection }
                 if !others.isEmpty { itemSection("No folder fits · \(others.count)", items: others) }
@@ -218,9 +231,18 @@ struct ReorganizeResults: View {
                             prominent: true, confirm: $confirmSureNames, count: sure) { model.approveReorganizeNames(sure: true) }
                 }
                 if unsure > 0 {
-                    nameRow("\(unsure) name\(unsure == 1 ? "" : "s") it isn't sure about, marked “not sure” below. Look them over first.",
+                    nameRow("\(unsure) name\(unsure == 1 ? "" : "s") it isn't sure about, marked “not sure”. Look them over first.",
                             button: "Approve All \(unsure) Not-Sure Name\(unsure == 1 ? "" : "s")", prominent: false,
                             confirm: $confirmUnsureNames, count: unsure) { model.approveReorganizeNames(sure: false) }
+                }
+                DisclosureGroup(isExpanded: $showNames) {
+                    NameReviewList(entries: model.reorganizeItems.compactMap { item in
+                        item.proposedName.map { NameReviewEntry(id: item.id, url: item.url, newName: $0, isSure: item.nameIsSure,
+                                                                isOn: item.renameSelected) }
+                    }) { id, selected in model.setReorganizeRename(id, selected) }
+                } label: {
+                    Text(showNames ? "Every new name, old → new" : "Show every new name, old → new")
+                        .font(.caption.weight(.medium))
                 }
             }
             .padding(14)
@@ -313,7 +335,7 @@ struct ReorganizeResults: View {
     private var duplicatesSection: some View {
         GroupBox("Exact duplicates") {
             VStack(alignment: .leading, spacing: 10) {
-                Caption("Files with exactly the same contents, whatever they're called. Checked copies go into a Duplicates folder; nothing is deleted.")
+                Caption("Files with exactly the same contents (checked byte for byte), whatever they're called. Checked copies go to the Trash; Undo All brings them back.")
                 ForEach(model.reorganizeDuplicates) { duplicate in
                     Toggle(isOn: Binding(
                         get: { duplicate.isSelected },
@@ -344,7 +366,7 @@ struct ReorganizeResults: View {
                     Button("Apply") { model.applyReorganizeChoices() }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("Undo All reverses them along with the rest of the run. Nothing is deleted.")
+                    Text("Undo All reverses them along with the rest of the run. Copies go to the Trash, which only you can empty.")
                 }
         }
     }
@@ -408,5 +430,73 @@ struct ReorganizeItemRow: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .filePreview(item.url)
+    }
+}
+
+/// A name waiting for you: the file, its new name, and whether Apple Intelligence is sure.
+struct NameReviewEntry: Identifiable {
+    let id: String
+    let url: URL
+    let newName: String
+    let isSure: Bool
+    let isOn: Bool
+}
+
+/// Every waiting name, old → new, sure ones first, each with its checkbox, so the names it isn't
+/// sure about can be read before approving them.
+struct NameReviewList: View {
+    let entries: [NameReviewEntry]
+    let setSelected: (String, Bool) -> Void
+
+    var body: some View {
+        let sorted = entries.filter(\.isSure) + entries.filter { !$0.isSure }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(sorted) { entry in
+                    NameReviewRow(entry: entry, setSelected: setSelected)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .frame(maxHeight: min(CGFloat(sorted.count) * 30 + 12, 340))
+    }
+}
+
+struct NameReviewRow: View {
+    let entry: NameReviewEntry
+    let setSelected: (String, Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Toggle("Rename", isOn: Binding(get: { entry.isOn }, set: { setSelected(entry.id, $0) }))
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+            FileTypeIcon(fileName: entry.newName, path: entry.url.path, size: 18, showsTag: false)
+            Text(entry.url.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 220, alignment: .leading)
+            Image(systemName: "arrow.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text(entry.newName)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if !entry.isSure {
+                Text("not sure")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(NylaStyle.wash(0.1), in: Capsule())
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+        .frame(height: 28)
+        .filePreview(entry.url)
     }
 }
