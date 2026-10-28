@@ -165,6 +165,18 @@ final class FileBrowsingTests: XCTestCase {
         XCTAssertFalse(PathTrail.isInside("/Users/me/Documents2", "/Users/me/Documents"))
     }
 
+    func testPrivacySwitchNamesTheRightSetting() {
+        let home = "/Users/me"
+        XCTAssertEqual(PrivacySwitch.forFolder("/Users/me/Desktop", home: home), .filesAndFolders("Desktop Folder"))
+        XCTAssertEqual(PrivacySwitch.forFolder("/Users/me/Documents/Bills", home: home), .filesAndFolders("Documents Folder"))
+        XCTAssertEqual(PrivacySwitch.forFolder("/Users/me/Downloads", home: home), .filesAndFolders("Downloads Folder"))
+        XCTAssertEqual(PrivacySwitch.forFolder("/Users/me/Library/Mobile Documents/com~apple~CloudDocs", home: home),
+                       .filesAndFolders("iCloud Drive"))
+        XCTAssertEqual(PrivacySwitch.forFolder("/Volumes/Backup", home: home), .filesAndFolders("Removable Volumes"))
+        XCTAssertEqual(PrivacySwitch.forFolder("/Users/me/DesktopOld", home: home), .fullDiskAccess)
+        XCTAssertTrue(PrivacySwitch.filesAndFolders("Desktop Folder").advice.contains("“Desktop Folder”"))
+    }
+
     func testSelectingWithShiftAndArrows() {
         let order = ["a", "b", "c", "d"]
         XCTAssertEqual(SelectionRange.between("c", "a", in: order), ["a", "b", "c"])
