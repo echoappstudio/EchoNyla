@@ -209,10 +209,11 @@ enum OnDeviceModel {
             let draft = try await session.respond(to: "Find: \(sentence)", generating: SearchDraft.self).content
             let kinds = SpotlightQuery.kinds(from: draft.kinds)
             let screenshots = draft.screenshotsOnly || draft.kinds.contains { $0.lowercased().hasPrefix("screenshot") }
-            return FileSearchRequest(words: Array(draft.words.prefix(6)), kinds: kinds.filter { $0 != .image || !screenshots },
-                                     screenshotsOnly: screenshots,
-                                     fromDay: SpotlightQuery.validDay(draft.fromDay), toDay: SpotlightQuery.validDay(draft.toDay),
-                                     source: draft.source.isEmpty ? nil : draft.source)
+            let request = FileSearchRequest(words: Array(draft.words.prefix(6)), kinds: kinds.filter { $0 != .image || !screenshots },
+                                            screenshotsOnly: screenshots,
+                                            fromDay: SpotlightQuery.validDay(draft.fromDay), toDay: SpotlightQuery.validDay(draft.toDay),
+                                            source: draft.source.isEmpty ? nil : draft.source)
+            return SpotlightQuery.grounded(request, in: sentence)
         }
     }
 }

@@ -864,13 +864,20 @@ struct SearchResultRow: View {
                         .truncationMode(.head)
                 }
                 Spacer()
-                Button("Open") { NSWorkspace.shared.open(result.url) }
+                Button("Open") { model.open(result.url) }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([result.url]) }
                 Button("What Is This?") { model.explain(result.url) }
                     .disabled(!model.aiReady || model.explaining.contains(result.id))
             }
             .controlSize(.small)
             .filePreview(result.url)
+            // Its own line, under the buttons, so the reason is never cut short.
+            if !result.reason.isEmpty {
+                Text(result.reason)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 42)
+            }
             if model.explaining.contains(result.id) {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)
@@ -1113,7 +1120,9 @@ struct SettingsTab: View {
             GroupBox("Moving files") {
                 VStack(alignment: .leading, spacing: 8) {
                     SettingToggle("Move files it's sure about by itself (with Undo)", isOn: $model.autoMove)
-                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you; sure renames of names that said nothing don't (see Apple Intelligence). This also applies to Deep Reorganize.")
+                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you. This also applies to Deep Reorganize and Check This Folder.")
+                    SettingToggle("Rename files it's sure about by itself (with Undo)", isOn: $model.autoRename)
+                    Caption("Only files whose old name said nothing, like IMG_4821 or Untitled 3, and only when most of the new name comes from what's in the file. Turn both of these off and EchoNyla only suggests: nothing is moved or renamed until you approve it.")
                     SettingToggle("Deep Reorganize: move exact copies to Trash by themselves", isOn: $model.trashExactCopies)
                     Caption("Only files whose every byte is the same as another file in the run. The one with the clearest name (or the oldest) stays, and Undo All brings the copies back. Nowhere else does EchoNyla put files in the Trash by itself.")
                     SettingToggle("Show a notification for each automatic move or suggestion", isOn: $model.notificationsEnabled)

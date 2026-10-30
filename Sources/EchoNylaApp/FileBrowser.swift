@@ -7,6 +7,38 @@ enum BrowserViewMode: String, CaseIterable {
     case list, icons
 }
 
+/// How big icons and pictures are in icons view. Large makes photos easy to tell apart without
+/// opening them.
+enum IconSize: String, CaseIterable {
+    case small, medium, large
+
+    var title: String { rawValue.capitalized }
+    var cellWidth: CGFloat {
+        switch self {
+        case .small: 112
+        case .medium: 168
+        case .large: 236
+        }
+    }
+    /// The picture's box inside a cell.
+    var picture: CGSize {
+        switch self {
+        case .small: CGSize(width: 72, height: 64)
+        case .medium: CGSize(width: 136, height: 112)
+        case .large: CGSize(width: 204, height: 168)
+        }
+    }
+    var glyph: CGFloat {
+        switch self {
+        case .small: 56
+        case .medium: 80
+        case .large: 104
+        }
+    }
+    /// The size thumbnails are drawn at, so they stay sharp.
+    var thumbnailSide: CGFloat { max(picture.width, picture.height) * 2 }
+}
+
 /// The Files area: one side, or two side by side, and which one the keys and toolbar work on.
 @MainActor
 @Observable
@@ -28,6 +60,9 @@ final class FilesArea {
     var viewMode: BrowserViewMode {
         didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: AppModel.Keys.filesViewMode) }
     }
+    var iconSize: IconSize {
+        didSet { UserDefaults.standard.set(iconSize.rawValue, forKey: AppModel.Keys.filesIconSize) }
+    }
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -37,6 +72,7 @@ final class FilesArea {
         sort = defaults.data(forKey: AppModel.Keys.filesSort).flatMap { try? JSONDecoder().decode(BrowserSort.self, from: $0) } ?? BrowserSort()
         grouping = defaults.string(forKey: AppModel.Keys.filesGrouping).flatMap(BrowserGrouping.init(rawValue:)) ?? .none
         viewMode = defaults.string(forKey: AppModel.Keys.filesViewMode).flatMap(BrowserViewMode.init(rawValue:)) ?? .list
+        iconSize = defaults.string(forKey: AppModel.Keys.filesIconSize).flatMap(IconSize.init(rawValue:)) ?? .small
     }
 
     var active: FileBrowser { sides[min(activeIndex, visibleSides.count - 1)] }
@@ -347,7 +383,11 @@ final class FileBrowser: Identifiable {
             }
             let results = await searcher.run(query, in: scope, limit: 300)
             guard scope == folder else { return }
-            let found = await Task.detached(priority: .userInitiated) { results.map { Self.item(for: $0.url) } }.value
+            // Photos and recordings have no words for Spotlight; EchoNyla's own look at them does.
+            let spotlightPaths = Set(results.map { $0.url.standardizedFileURL.path })
+            let understood = model.understoodFiles(matching: request, besides: spotlightPaths, limit: 300 - results.count, in: scope)
+            let urls = results.map(\.url) + understood.map(\.url)
+            let found = await Task.detached(priority: .userInitiated) { urls.map { Self.item(for: $0) } }.value
             searchResults = found
             isSearching = false
             selection = []

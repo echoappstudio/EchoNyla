@@ -92,9 +92,17 @@ struct ReorganizeTab: View {
     }
 
     private var startMessage: String {
-        var text = model.autoMove
-            ? "Sure files are renamed and moved by themselves; everything else waits on this page. You can pause it. Undo All puts everything back."
-            : "Moving by itself is off in Settings, so files are only renamed when Apple Intelligence is sure; every move waits on this page. Undo All puts everything back."
+        var text: String
+        switch (model.autoMove, model.autoRename) {
+        case (true, true):
+            text = "Sure files are renamed and moved by themselves; everything else waits on this page. You can pause it. Undo All puts everything back."
+        case (true, false):
+            text = "Sure files are moved by themselves; every new name waits on this page. You can pause it. Undo All puts everything back."
+        case (false, true):
+            text = "Moving by itself is off in Settings, so files are only renamed when Apple Intelligence is sure; every move waits on this page. Undo All puts everything back."
+        case (false, false):
+            text = "Moving and renaming by themselves are off in Settings, so nothing changes until you approve it on this page."
+        }
         if model.reorganizeRun?.hasChanges == true {
             text += " Starting again replaces the last run's Undo All."
         }

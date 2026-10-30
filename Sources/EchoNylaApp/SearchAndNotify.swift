@@ -8,6 +8,8 @@ struct SearchResult: Identifiable, Equatable {
     let url: URL
     let name: String
     let modified: Date?
+    /// Why it came up, like “Name has “dentist” · Text inside has “invoice””.
+    var reason = ""
 }
 
 /// Set once a search has delivered its results.

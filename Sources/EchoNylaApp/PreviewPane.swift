@@ -129,7 +129,7 @@ struct PreviewPaneContent: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
+        .onTapGesture(count: 2) { model.open(url) }
         .help("Double-click to open. Space opens the full preview.")
     }
 
@@ -154,7 +154,7 @@ struct PreviewPaneContent: View {
 
     private var actions: some View {
         HStack(spacing: 6) {
-            Button("Open") { NSWorkspace.shared.open(url) }
+            Button("Open") { model.open(url) }
             Button("Quick Look", systemImage: "eye") { model.quickLookSelected() }
                 .labelStyle(.iconOnly)
                 .help("Full preview (Space)")
@@ -174,6 +174,8 @@ struct PreviewPaneContent: View {
             Text(folderSize.map { ByteText.text($0) + " in all" } ?? "Adding up its size…")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
+            FolderThumbnails(folder: url)
+                .padding(.top, 4)
         }
     }
 
@@ -348,6 +350,80 @@ struct PreviewPaneContent: View {
 }
 
 /// A small heading and what's under it, in the preview pane.
+/// The newest files in a folder with real pictures, so you can see what's in it without opening it.
+/// One click shows a file big in the pane; a double-click on the folder's picture opens it in Files.
+struct FolderThumbnails: View {
+    let folder: URL
+    @Environment(AppModel.self) private var model
+    @State private var files: [URL] = []
+    @State private var pictures: [URL: NSImage] = [:]
+
+    static let limit = 12
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], spacing: 6) {
+            ForEach(files, id: \.self) { file in
+                tile(file)
+            }
+        }
+        .task(id: folder) {
+            files = await Task.detached(priority: .userInitiated) { Self.newestFiles(in: folder) }.value
+            for file in files {
+                if Task.isCancelled { return }
+                if let picture = await FilePeekImages.image(for: file, side: 180) { pictures[file] = picture }
+            }
+        }
+    }
+
+    private func tile(_ file: URL) -> some View {
+        ZStack {
+            if let picture = pictures[file] {
+                Image(nsImage: picture)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                FileTypeIcon(fileName: file.lastPathComponent, path: file.path, size: 40)
+            }
+        }
+        .frame(width: 76, height: 76)
+        .background(NylaStyle.wash(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture { model.select(file) }
+        .help(file.lastPathComponent)
+    }
+
+    /// The newest files in the folder. A folder holding only folders (like Pictures with an album per trip)
+    /// shows the newest files from the folders inside it instead.
+    nonisolated static func newestFiles(in folder: URL) -> [URL] {
+        let (files, folders) = contents(of: folder)
+        if !files.isEmpty { return newest(files) }
+        return newest(folders.prefix(40).flatMap { contents(of: $0).files })
+    }
+
+    private nonisolated static let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .contentModificationDateKey]
+
+    private nonisolated static func contents(of folder: URL) -> (files: [(URL, Date)], folders: [URL]) {
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys,
+                                                                          options: [.skipsHiddenFiles]) else { return ([], []) }
+        var files: [(URL, Date)] = []
+        var folders: [URL] = []
+        for url in contents.prefix(5_000) {
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if values?.isRegularFile == true {
+                files.append((url, values?.contentModificationDate ?? .distantPast))
+            } else if values?.isDirectory == true, values?.isPackage != true {
+                folders.append(url)
+            }
+        }
+        return (files, folders)
+    }
+
+    private nonisolated static func newest(_ files: [(URL, Date)]) -> [URL] {
+        files.sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
+    }
+}
+
 struct PaneSection<Content: View>: View {
     let title: String
     let content: Content

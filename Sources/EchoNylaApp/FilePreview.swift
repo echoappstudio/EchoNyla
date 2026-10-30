@@ -59,7 +59,7 @@ struct FilePreviewModifier: ViewModifier {
         if NSApp.keyWindow?.firstResponder is NSText { NSApp.keyWindow?.makeFirstResponder(nil) }
         if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
             quickLook = nil
-            NSWorkspace.shared.open(url)
+            model.open(url)
         } else if clickQuickLooks {
             quickLook = url
         } else {

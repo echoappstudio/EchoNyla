@@ -82,6 +82,16 @@ extension AppModel {
         return values?.isDirectory == true && values?.isPackage != true
     }
 
+    /// Opens a file in its app, and a folder here in Files rather than in Finder.
+    func open(_ url: URL) {
+        if isFolder(url) {
+            selectedTab = .files
+            files.active.go(to: url)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     // MARK: What EchoNyla knows about a file
 
     func insight(for url: URL) -> FileInsight? {
