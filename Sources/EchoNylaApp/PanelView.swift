@@ -249,7 +249,7 @@ struct SortDropZone: View {
                 Text(isTargeted ? "Release to sort" : "Or drop here and let EchoNyla sort it")
                     .font(.system(size: 13, weight: .semibold))
                 Text(model.autoMove ? "Files it's sure about are filed right away, with Undo. The rest wait for you."
-                     : "Nothing moves until you choose a folder.")
+                     : model.autoRename ? "Nothing moves until you choose a folder." : "Nothing moves or is renamed until you approve it.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

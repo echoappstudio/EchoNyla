@@ -91,7 +91,11 @@ final class FileJudgingTests: XCTestCase {
     func testFoldersLearnFromTheirFiles() {
         let samples = ["A screenshot of Purevo's waveform view", "Purevo settings window with Clean audio", "Verbyn window"]
         XCTAssertEqual(FolderProfile.words(samples: samples), ["purevo"])
-        XCTAssertEqual(Set(FolderProfile.words(samples: ["Acme plumbing invoice"])), ["acme", "plumbin", "invoice"])
+        // Fewer than three files teach nothing: one file put there once isn't what the folder is for.
+        XCTAssertEqual(FolderProfile.words(samples: ["Acme plumbing invoice"]), [])
+        XCTAssertEqual(FolderProfile.words(samples: ["Acme plumbing invoice", "Acme plumbing estimate"]), [])
+        XCTAssertEqual(Set(FolderProfile.words(samples: ["Acme plumbing invoice", "Acme plumbing estimate", "Water heater manual"])),
+                       ["acme", "plumbin"])
         let prompt = FolderProfile.notePrompt(folderName: "purevopic", descriptions: ["Purevo's waveform"])
         XCTAssertTrue(prompt.hasPrefix("These files are in the folder \"purevopic\":\n- Purevo's waveform\n"))
     }
@@ -197,6 +201,22 @@ final class FileJudgingTests: XCTestCase {
         XCTAssertTrue(RenameGrounding.isGrounded(title: "Dog at the beach", evidence: labelled))
     }
 
+    func testOneMatchingWordDoesNotGroundAName() {
+        let invoice = Evidence(facts: FileFacts(fileName: "document (3).pdf", text: "Acme Plumbing Invoice 2231 kitchen sink repair"),
+                               description: "")
+        XCTAssertTrue(RenameGrounding.isGrounded(title: "Acme Plumbing invoice", evidence: invoice))
+        XCTAssertTrue(RenameGrounding.isGrounded(title: "Acme kitchen sink repair estimate", evidence: invoice))
+        // The right company with the wrong subject: only one of four words is in the file.
+        XCTAssertFalse(RenameGrounding.isGrounded(title: "Acme roofing warranty contract", evidence: invoice))
+        // Words every screen description has ("app", "window") don't count either way.
+        XCTAssertFalse(RenameGrounding.isGrounded(title: "App window", evidence: invoice))
+    }
+
+    func testTheModelIsNotToldToScoreHigh() {
+        XCTAssertFalse(ModelPrompt.rules.contains("85 or more"))
+        XCTAssertTrue(ModelPrompt.rules.contains("Answer below 50 when the name is a guess"))
+    }
+
     func testNamesAreTidied() {
         let vocabulary = ["purevopic", "Pictures and screen recordings for the Purevo app's website", "Utility bills and invoices"]
         // File names read inside a screenshot lose their extension.
@@ -241,6 +261,27 @@ final class FileJudgingTests: XCTestCase {
         XCTAssertEqual(SmartName.make(title: "Acme Plumbing invoice", original: "scan.pdf", kind: .pdf, captured: captured, calendar: calendar),
                        "Acme Plumbing invoice.pdf")
         XCTAssertNil(SmartName.make(title: "Screenshot", original: "IMG_1.png", kind: .pdf, captured: nil, calendar: calendar))
+    }
+
+    func testRecordingsAndDocumentsGetADateToo() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let captured = Date(timeIntervalSince1970: 1_793_000_000)   // 2026-10-26 UTC
+        let now = Date(timeIntervalSince1970: 1_793_100_000)
+        // A recording sorts by the day it was made, like a photo.
+        XCTAssertEqual(SmartName.make(title: "Denver lease voicemail", original: "New Recording 12.m4a", kind: .audio,
+                                      captured: captured, calendar: calendar, now: now),
+                       "2026-10-26 Denver lease voicemail.m4a")
+        // A document gets the month written in it, not the day it was downloaded.
+        XCTAssertEqual(SmartName.make(title: "Acme Plumbing invoice", original: "document (3).pdf", kind: .pdf, captured: captured,
+                                      text: "ACME PLUMBING\nInvoice 2231\nDate: March 12, 2026\nKitchen sink repair", calendar: calendar, now: now),
+                       "2026-03 Acme Plumbing invoice.pdf")
+        XCTAssertEqual(SmartName.monthWritten(in: "Statement period 2025-11-01 to 2025-11-30", calendar: calendar, now: now), "2025-11")
+        // No year written, or nothing that looks like a date: no date in the name.
+        XCTAssertNil(SmartName.monthWritten(in: "See you on March 12 at noon", calendar: calendar, now: now))
+        XCTAssertNil(SmartName.monthWritten(in: "Kitchen sink repair, 2 hours", calendar: calendar, now: now))
+        // A date years ahead (an expiry, a lease end) isn't the document's date.
+        XCTAssertNil(SmartName.monthWritten(in: "Valid until January 1, 2031", calendar: calendar, now: now))
     }
 
     // MARK: Check This Folder and Undo All

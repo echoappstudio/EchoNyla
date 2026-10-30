@@ -614,6 +614,9 @@ public struct FileInsights: Codable, Equatable, Sendable {
 
     public var count: Int { entries.count }
 
+    /// Every key, oldest first.
+    public var keys: [String] { order }
+
     public func insight(for key: String) -> FileInsight? { entries[key] }
 
     public mutating func remove(_ key: String) {

@@ -177,6 +177,26 @@ final class IntelligenceTests: XCTestCase {
         XCTAssertEqual(DecisionPrompt.examples(learning: learning, destinations: folders, locked: [], leavingOut: "Comcast 0042 (2).pdf"),
                        ["“W2 2025.pdf” → Taxes"])
     }
+
+    func testExamplesAreOnlyMovesAboutTheSameThing() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let learning = [
+            LearningRecord(fileExtension: "pdf", tokens: ["comcast"], destinationID: "bills", updatedAt: now.addingTimeInterval(10),
+                           sampleName: "Comcast 0042.pdf"),
+            LearningRecord(fileExtension: "pdf", tokens: ["w2"], destinationID: "taxes", updatedAt: now, sampleName: "W2 Acme payroll 2025.pdf")
+        ]
+        // A Comcast bill sees only the Comcast move, found from the words inside it.
+        let comcast = FileFacts(fileName: "document (3).pdf", text: "Comcast Xfinity monthly statement, amount due")
+        XCTAssertEqual(DecisionPrompt.examples(learning: learning, destinations: folders, locked: [], about: comcast),
+                       ["“Comcast 0042.pdf” → Bills"])
+        // A file about something else sees neither: a past move is no reason on its own.
+        let photo = FileFacts(fileName: "IMG_4821.HEIC", imageLabels: ["dog", "beach"])
+        XCTAssertEqual(DecisionPrompt.examples(learning: learning, destinations: folders, locked: [], about: photo), [])
+        // Names in the file count too.
+        let payroll = FileFacts(fileName: "scan.pdf", names: ["Acme"])
+        XCTAssertEqual(DecisionPrompt.examples(learning: learning, destinations: folders, locked: [], about: payroll),
+                       ["“W2 Acme payroll 2025.pdf” → Taxes"])
+    }
 }
 
 final class AutoMoveTests: XCTestCase {

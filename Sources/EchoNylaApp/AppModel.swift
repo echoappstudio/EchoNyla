@@ -164,6 +164,7 @@ final class AppModel {
     private var storedAIEnabled: Bool
     private var storedReadContents: Bool
     private var storedAutoMove: Bool
+    private var storedAutoRename: Bool
     private var storedNotifications: Bool
     private var storedWatchDownloads: Bool
     private var storedWatchDesktop: Bool
@@ -181,6 +182,12 @@ final class AppModel {
     var autoMove: Bool {
         get { storedAutoMove }
         set { storedAutoMove = newValue; defaults.set(newValue, forKey: Keys.autoMove) }
+    }
+    /// Sure names for files whose old name said nothing are applied without asking. Off: every
+    /// new name waits for you. With this and `autoMove` off, EchoNyla only suggests.
+    var autoRename: Bool {
+        get { storedAutoRename }
+        set { storedAutoRename = newValue; defaults.set(newValue, forKey: Keys.autoRename) }
     }
     var notificationsEnabled: Bool {
         get { storedNotifications }
@@ -215,6 +222,7 @@ final class AppModel {
         static let aiEnabled = "EchoNyla.ai.enabled"
         static let readContents = "EchoNyla.ai.readContents"
         static let autoMove = "EchoNyla.autoMove"
+        static let autoRename = "EchoNyla.autoRename.v1"
         static let notifications = "EchoNyla.notifications"
         static let watchDownloads = "EchoNyla.watch.downloads"
         static let watchDesktop = "EchoNyla.watch.desktop"
@@ -233,6 +241,7 @@ final class AppModel {
         static let filesSort = "EchoNyla.files.sort.v1"
         static let filesGrouping = "EchoNyla.files.grouping.v1"
         static let filesViewMode = "EchoNyla.files.viewMode.v1"
+        static let filesIconSize = "EchoNyla.files.iconSize.v1"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -323,6 +332,7 @@ final class AppModel {
         storedAIEnabled = flag(Keys.aiEnabled)
         storedReadContents = flag(Keys.readContents)
         storedAutoMove = flag(Keys.autoMove)
+        storedAutoRename = flag(Keys.autoRename)
         storedNotifications = flag(Keys.notifications)
         storedWatchDownloads = flag(Keys.watchDownloads)
         storedWatchDesktop = flag(Keys.watchDesktop)
@@ -520,8 +530,8 @@ final class AppModel {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         let files = looseFiles(in: url, limit: FolderProfile.sampleSize)
-        guard !files.isEmpty else {
-            statusMessage = "\(folder.name) has no files to learn from yet."
+        guard files.count >= FolderProfile.minimumFiles else {
+            statusMessage = "\(folder.name) needs at least \(FolderProfile.minimumFiles) files in it before EchoNyla can learn from it."
             return
         }
         var descriptions: [String] = []
@@ -540,7 +550,7 @@ final class AppModel {
             samples.append(answer.whatItIs + " " + answer.name)
         }
         withExtendedLifetime(warm) {}
-        guard !Task.isCancelled, !descriptions.isEmpty else { return }
+        guard !Task.isCancelled, descriptions.count >= FolderProfile.minimumFiles else { return }
         folderLearnProgress = "Writing a note for \(folder.name)…"
         let prompt = FolderProfile.notePrompt(folderName: folder.name, descriptions: descriptions)
         let reply = try? await OnDeviceModel.learnedNote(prompt)
@@ -919,13 +929,15 @@ final class AppModel {
         guard aiReady else { return nil }
         let facts = prepared.facts
         let locked = lockedDestinationIDs
-        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked, leavingOut: facts.fileName)
+        let examples = DecisionPrompt.examples(learning: learning, destinations: destinations, locked: locked, leavingOut: facts.fileName,
+                                               about: facts)
         let question = OnDeviceModel.FileQuestion(facts: facts, picture: prepared.picture, instructions: batchInstructions,
                                                   folderNames: AIFolders.choosable(destinations, locked: locked).map(\.name),
                                                   currentFolderName: currentFolderName, examples: examples)
         guard let answer = try? await OnDeviceModel.ask(question) else { return nil }
-        let checked = ModelDecisionCheck.check(answer, facts: facts, destinations: destinations, locked: locked, bar: confidenceBar,
+        var checked = ModelDecisionCheck.check(answer, facts: facts, destinations: destinations, locked: locked, bar: confidenceBar,
                                                captured: prepared.captured)
+        if !autoRename { checked.renamesByItself = false }
         rememberInsight(checked, facts: facts, url: url)
         return checked
     }
@@ -1173,7 +1185,7 @@ final class AppModel {
                 let prepared = await preparer.prepare(file, next: files.indices.contains(number + 1) ? files[number + 1] : nil)
                 guard !Task.isCancelled, let judged = await judge(file, prepared: prepared, currentFolderName: folder.name) else { continue }
                 switch FolderCheck.verdict(currentFolderID: id, decision: judged) {
-                case .move(let target):
+                case .move(let target) where autoMove:
                     let detail = "Didn't fit \(folder.name). \(judged.decision.reason)"
                     if let entryID = performMove(file, to: target, kind: .autoMoved, detail: detail, ai: judged.decision, enrich: false,
                                                  runID: runID, runTitle: title) {
@@ -1191,7 +1203,8 @@ final class AppModel {
                     } else if judged.decision.proposedName == nil {
                         markReviewed(file)
                     }
-                case .maybe(let target):
+                case .maybe(let target), .move(let target):
+                    // Sure moves wait here too when moving by itself is off.
                     folderCheckFindings.append(FolderCheckFinding(url: file, folderID: id, suggestedID: target,
                         note: "Might belong in \(destinationName(for: target) ?? "another folder"). \(judged.decision.summary)"))
                 case .fitsNothing:
@@ -2245,11 +2258,37 @@ final class AppModel {
                 searchNote = "Describe the file with a few words, like “the PDF from the dentist last month”."
                 return
             }
-            let results = await searcher.run(query)
+            var results = await searcher.run(query)
+            results += understoodFiles(matching: request, besides: Set(results.map(\.id)), limit: max(0, 60 - results.count))
+            for index in results.indices {
+                results[index].reason = SearchMatch.reason(words: request.words, name: results[index].name,
+                                                            insight: insight(for: results[index].url))
+            }
             searchResults = results
             isSearching = false
             searchNote = Self.describe(request, usedAI: usedAI, count: results.count)
         }
+    }
+
+    /// Files EchoNyla already looked at whose description, names or spoken words match, which
+    /// Spotlight can't find by their text (photos, recordings). Only searches by words; a search for
+    /// screenshots or a website stays with Spotlight, which knows those. `folder` keeps it to one folder and the
+    /// folders inside it.
+    func understoodFiles(matching request: FileSearchRequest, besides found: Set<String>, limit: Int, in folder: URL? = nil) -> [SearchResult] {
+        guard limit > 0, !request.words.isEmpty, !request.screenshotsOnly, request.source == nil else { return [] }
+        let prefix = folder.map { $0.standardizedFileURL.path.hasSuffix("/") ? $0.standardizedFileURL.path : $0.standardizedFileURL.path + "/" }
+        var results: [SearchResult] = []
+        for path in SearchMatch.insightPaths(words: request.words, in: insights) where !found.contains(path) {
+            if let prefix, !path.hasPrefix(prefix) { continue }
+            guard results.count < limit else { break }
+            let url = URL(fileURLWithPath: path)
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
+                  values.isRegularFile == true,
+                  request.kinds.isEmpty || request.kinds.contains(FileKind.from(fileExtension: url.pathExtension)),
+                  SpotlightQuery.isInRange(values.contentModificationDate, from: request.fromDay, to: request.toDay) else { continue }
+            results.append(SearchResult(url: url, name: url.lastPathComponent, modified: values.contentModificationDate))
+        }
+        return results
     }
 
     static func todayText() -> String {

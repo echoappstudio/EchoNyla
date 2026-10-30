@@ -175,14 +175,18 @@ public enum DecisionPrompt {
     /// Your latest moves as examples. Names that say nothing ("Screenshot 2026-10-25 at 12.33.39 AM")
     /// are left out: they only teach "screenshots went there", which pulled every screenshot into one
     /// folder. `leavingOut` drops the file being tested and its copies ("… (2).png").
+    /// With `about`, only moves that share a telling word with that file are shown: one file you put
+    /// somewhere once showed up in the question about every file, and the model copied it.
     public static func examples(learning: [LearningRecord], destinations: [Destination], locked: Set<String>, limit: Int = 8,
-                                leavingOut fileName: String? = nil) -> [String] {
+                                leavingOut fileName: String? = nil, about facts: FileFacts? = nil) -> [String] {
         let allowed = AIFolders.choosable(destinations, locked: locked)
+        let fileWords = facts.map(relatedWords)
         var seen: Set<String> = []
         var lines: [String] = []
         for record in learning.sorted(by: { $0.updatedAt > $1.updatedAt }) {
             guard lines.count < limit, let sample = record.sampleName, !NameQuality.saysNothing(sample),
                   !(fileName.map { NameQuality.isSameName($0, sample) } ?? false),
+                  fileWords.map({ !$0.isDisjoint(with: Words.distinctive((sample as NSString).deletingPathExtension)) }) ?? true,
                   let folder = allowed.first(where: { $0.id == record.destinationID }) else { continue }
             let key = sample.lowercased()
             guard !seen.contains(key) else { continue }
@@ -190,5 +194,12 @@ public enum DecisionPrompt {
             lines.append("“\(TextTools.redactLongNumbers(sample))” → \(folder.name)")
         }
         return lines
+    }
+
+    /// The telling words of a file (stems): its name and what EchoNyla read from it.
+    static func relatedWords(_ facts: FileFacts) -> Set<String> {
+        Words.distinctive([(facts.fileName as NSString).deletingPathExtension, facts.text, facts.speech,
+                           facts.names.joined(separator: " "), facts.imageLabels.joined(separator: " "),
+                           facts.downloadedFrom.joined(separator: " ")].joined(separator: " "))
     }
 }

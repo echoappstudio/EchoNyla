@@ -56,6 +56,7 @@ enum FilesLayout {
 // MARK: - Toolbar
 
 struct FilesToolbar: View {
+    static let tidyHelp = "Clean Up looks at this folder and lists what it would move, rename or put in the Trash, for you to approve"
     @Bindable var area: FilesArea
     @Environment(AppModel.self) private var model
     @FocusState private var searchFocused: Bool
@@ -88,7 +89,7 @@ struct FilesToolbar: View {
             .padding(.vertical, 5)
             .background(NylaStyle.wash(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(NylaStyle.hairline, lineWidth: 1))
-            .frame(minWidth: 160, maxWidth: 320)
+            .frame(minWidth: 110, maxWidth: 320)
             .help("Type to narrow the list by name. Press Return to search this folder in your own words, like “tax PDFs from last spring”.")
             Spacer(minLength: 4)
             Picker("View", selection: $area.viewMode) {
@@ -99,6 +100,22 @@ struct FilesToolbar: View {
             .labelsHidden()
             .fixedSize()
             .help("List or icons")
+            if area.viewMode == .icons {
+                Menu {
+                    Picker("Icon Size", selection: $area.iconSize) {
+                        ForEach(IconSize.allCases, id: \.self) { size in
+                            Text(size.title).tag(size)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Image(systemName: "photo")
+                        .accessibilityLabel("Icon Size")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Icon size: \(area.iconSize.title). Large shows pictures big enough to see without opening them.")
+            }
             Menu {
                 Picker("Group By", selection: $area.grouping) {
                     ForEach(BrowserGrouping.allCases, id: \.self) { grouping in
@@ -125,9 +142,13 @@ struct FilesToolbar: View {
                       help: area.isSplit ? "One folder" : "Two folders side by side") {
                 withAnimation(.easeInOut(duration: 0.2)) { area.isSplit.toggle() }
             }
-            Button("Tidy This Folder", systemImage: "sparkles") { model.tidy(active.folder) }
-                .buttonStyle(.pill)
-                .help("Clean Up looks at this folder and lists what it would move, rename or put in the Trash, for you to approve")
+            // In a narrow window the button keeps only its sparkles, so the toolbar never pushes the window wider.
+            ViewThatFits(in: .horizontal) {
+                Button("Tidy This Folder", systemImage: "sparkles") { model.tidy(active.folder) }
+                    .buttonStyle(.pill)
+                    .help(Self.tidyHelp)
+                BarButton(symbol: "sparkles", help: "Tidy This Folder: " + Self.tidyHelp) { model.tidy(active.folder) }
+            }
         }
         .padding(.horizontal, 14)
         .frame(height: 46)
@@ -927,13 +948,12 @@ struct FileIconsView: View {
     let order: [String]
     @Environment(AppModel.self) private var model
 
-    static let cellWidth: CGFloat = 112
     static let spacing: CGFloat = 10
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: Self.cellWidth, maximum: Self.cellWidth + 24), spacing: Self.spacing)],
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: area.iconSize.cellWidth, maximum: area.iconSize.cellWidth + 24), spacing: Self.spacing)],
                           alignment: .leading, spacing: 12, pinnedViews: [.sectionHeaders]) {
                     ForEach(groups) { group in
                         Section {
@@ -954,9 +974,18 @@ struct FileIconsView: View {
                 if let cursor { proxy.scrollTo(cursor) }
             }
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-            browser.iconColumns = max(1, Int((width - 24 + Self.spacing) / (Self.cellWidth + Self.spacing)))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { newWidth in
+            width = newWidth
+            countColumns()
         }
+        .onChange(of: area.iconSize) { countColumns() }
+    }
+
+    @State private var width: CGFloat = 0
+
+    /// How many icons fit in a row, for the arrow keys.
+    private func countColumns() {
+        browser.iconColumns = max(1, Int((width - 24 + Self.spacing) / (area.iconSize.cellWidth + Self.spacing)))
     }
 }
 
@@ -981,10 +1010,10 @@ struct FileIconCell: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                         .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
                 } else {
-                    FileGlyph(item: item, size: 56)
+                    FileGlyph(item: item, size: area.iconSize.glyph)
                 }
             }
-            .frame(width: 72, height: 64)
+            .frame(width: area.iconSize.picture.width, height: area.iconSize.picture.height)
             Text(item.name)
                 .font(.system(size: 11.5))
                 .lineLimit(2)
@@ -996,7 +1025,7 @@ struct FileIconCell: View {
             FileSmarts(item: item, browser: browser, compact: true)
                 .scaleEffect(0.9)
         }
-        .frame(width: FileIconsView.cellWidth)
+        .frame(width: area.iconSize.cellWidth)
         .padding(.vertical, 6)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1008,9 +1037,9 @@ struct FileIconCell: View {
         .fileHoverCard(item.url, isFolder: item.isFolder)
         .fileDragAndDrop(item, browser: browser, targeted: $targeted)
         .contextMenu { FileMenu(item: item, browser: browser, area: area) }
-        .task(id: item.id) {
+        .task(id: "\(item.id)|\(area.iconSize.rawValue)") {
             guard !item.isFolder else { return }
-            picture = await FilePeekImages.image(for: item.url, side: 128)
+            picture = await FilePeekImages.image(for: item.url, side: area.iconSize.thumbnailSide)
         }
     }
 }
@@ -1088,7 +1117,12 @@ struct FileMenu: View {
 
     var body: some View {
         Button("Open") {
-            for url in targets { NSWorkspace.shared.open(url) }
+            // A folder opens here, on this side; files open in their apps.
+            if item.isFolder, targets.count == 1 {
+                browser.go(to: item.url)
+            } else {
+                for url in targets where !model.isFolder(url) { NSWorkspace.shared.open(url) }
+            }
         }
         if !item.isFolder {
             Button("Open With…") { openWith() }
