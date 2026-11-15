@@ -41,8 +41,7 @@ struct FilesTab: View {
 @MainActor
 enum FilesLayout {
     static func groups(_ browser: FileBrowser, area: FilesArea, model: AppModel) -> [BrowserGroup] {
-        let shown = browser.shown(sort: area.sort)
-        return BrowserGroups.make(shown, by: area.grouping) { item in
+        browser.layout(sort: area.sort, grouping: area.grouping, insightsVersion: model.insightsVersion) { item in
             FileCategory.of(name: item.name, isFolder: item.isFolder, isScreenshot: item.isScreenshot,
                             summary: model.insight(for: item)?.summary)
         }
@@ -60,8 +59,6 @@ struct FilesToolbar: View {
     @Bindable var area: FilesArea
     @Environment(AppModel.self) private var model
     @FocusState private var searchFocused: Bool
-    @State private var newFolder = false
-    @State private var newFolderName = "untitled folder"
 
     var body: some View {
         @Bindable var active = area.active
@@ -131,13 +128,15 @@ struct FilesToolbar: View {
                 }
                 .pickerStyle(.inline)
                 Toggle("Ascending", isOn: Binding(get: { area.sort.ascending }, set: { area.sort.ascending = $0 }))
+                Divider()
+                Toggle("Show Hidden Files (⇧⌘.)", isOn: $area.showsHidden)
             } label: {
                 Label(area.grouping == .none ? "Group" : area.grouping.title, systemImage: "rectangle.3.group")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Group the files by kind, date or what they are, and choose the order")
-            BarButton(symbol: "folder.badge.plus", help: "New Folder (⇧⌘N)") { newFolder = true }
+            BarButton(symbol: "folder.badge.plus", help: "New Folder (⇧⌘N)") { FilesActions.newFolder(in: active, model: model) }
             BarButton(symbol: area.isSplit ? "rectangle" : "rectangle.split.2x1",
                       help: area.isSplit ? "One folder" : "Two folders side by side") {
                 withAnimation(.easeInOut(duration: 0.2)) { area.isSplit.toggle() }
@@ -153,20 +152,45 @@ struct FilesToolbar: View {
         .padding(.horizontal, 14)
         .frame(height: 46)
         .onChange(of: FilesKeys.shared.searchRequests) { searchFocused = true }
-        .onChange(of: FilesKeys.shared.newFolderRequests) { newFolder = true }
-        .alert("New Folder", isPresented: $newFolder) {
-            TextField("Name", text: $newFolderName)
-            Button("Create") {
-                if let made = model.makeFolder(named: newFolderName, in: active.folder) {
-                    active.selection = [made.standardizedFileURL.path]
-                    active.cursor = made.standardizedFileURL.path
-                }
-                newFolderName = "untitled folder"
-            }
-            Button("Cancel", role: .cancel) { newFolderName = "untitled folder" }
-        } message: {
-            Text("In \(active.folderName).")
-        }
+    }
+}
+
+/// Things the toolbar, the keys and the right-click menu share.
+@MainActor
+enum FilesActions {
+    /// A new folder, named as Finder names them, with its name ready to type over.
+    static func newFolder(in browser: FileBrowser, model: AppModel) {
+        guard let made = model.makeNewFolder(in: browser.folder) else { return }
+        let id = made.standardizedFileURL.path
+        browser.selection = [id]
+        browser.cursor = id
+        browser.anchor = id
+        browser.renaming = id
+        browser.revealAfterLoad = id
+        model.select(made)
+    }
+
+    /// Return, or Rename in the menu: the name turns into a text box with the part before the
+    /// extension selected.
+    static func rename(_ id: String, in browser: FileBrowser) {
+        browser.selection = [id]
+        browser.cursor = id
+        browser.anchor = id
+        browser.renaming = id
+    }
+
+    /// The text box's answer: a new name renames the file (with Undo); the same name or Esc leaves it.
+    static func finishRename(_ item: BrowserItem, newName: String?, browser: FileBrowser, model: AppModel) {
+        guard browser.renaming == item.id else { return }
+        browser.renaming = nil
+        guard let newName, newName.trimmingCharacters(in: .whitespacesAndNewlines) != item.name,
+              let renamed = model.renameItem(item.url, to: newName) else { return }
+        let id = renamed.standardizedFileURL.path
+        browser.selection = [id]
+        browser.cursor = id
+        browser.anchor = id
+        browser.revealAfterLoad = id
+        model.select(renamed)
     }
 }
 
@@ -406,7 +430,6 @@ struct BrowserSideView: View {
     let browser: FileBrowser
     let isActive: Bool
     @Environment(AppModel.self) private var model
-    @State private var renameText = ""
     @State private var backgroundTargeted = false
 
     var body: some View {
@@ -454,24 +477,6 @@ struct BrowserSideView: View {
         // Back from System Settings: show the folder as soon as macOS lets EchoNyla in.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             browser.retryIfBlocked()
-        }
-        .onChange(of: browser.renaming) { _, path in
-            renameText = path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
-        }
-        .alert("Rename", isPresented: Binding(get: { browser.renaming != nil }, set: { if !$0 { browser.renaming = nil } })) {
-            TextField("Name", text: $renameText)
-            Button("Rename") {
-                if let path = browser.renaming, let renamed = model.renameItem(URL(fileURLWithPath: path), to: renameText) {
-                    let id = renamed.standardizedFileURL.path
-                    browser.selection = [id]
-                    browser.cursor = id
-                    model.select(renamed)
-                }
-                browser.renaming = nil
-            }
-            Button("Cancel", role: .cancel) { browser.renaming = nil }
-        } message: {
-            Text("Undo puts the old name back.")
         }
     }
 
@@ -654,6 +659,8 @@ struct PathStepButton: View {
 @MainActor
 enum FileClicks {
     static func clicked(_ item: BrowserItem, browser: FileBrowser, area: FilesArea, order: [String], model: AppModel) {
+        // A click in the name box being typed in places the cursor; it doesn't select again.
+        guard browser.renaming != item.id else { return }
         area.activate(browser)
         if NSApp.keyWindow?.firstResponder is NSText { NSApp.keyWindow?.makeFirstResponder(nil) }
         let event = NSApp.currentEvent
@@ -723,11 +730,15 @@ struct FileListView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
+                    .fileDragContainer(browser)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { FileClicks.clickedBackground(browser: browser, area: area, model: model) }
                 .onChange(of: browser.cursor) { _, cursor in
                     if let cursor { proxy.scrollTo(cursor) }
+                }
+                .onChange(of: browser.revealRequests) {
+                    if let cursor = browser.cursor { proxy.scrollTo(cursor, anchor: .center) }
                 }
             }
         }
@@ -816,23 +827,37 @@ struct FileRowView: View {
         let selected = browser.selection.contains(item.id)
         HStack(spacing: 8) {
             FileGlyph(item: item, size: 20)
+                .opacity(item.name.hasPrefix(".") ? 0.5 : 1)
             HStack(spacing: 6) {
-                Text(item.name)
-                    .font(.system(size: 12.5))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .layoutPriority(1)
-                FileSmarts(item: item, browser: browser, compact: false)
+                if browser.renaming == item.id {
+                    InlineNameField(name: item.name, isFolder: item.isFolder, alignment: .left) { newName in
+                        FilesActions.finishRename(item, newName: newName, browser: browser, model: model)
+                    }
+                    .frame(height: 20)
+                    .frame(maxWidth: 420)
+                } else {
+                    Text(item.name)
+                        .font(.system(size: 12.5))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .opacity(item.name.hasPrefix(".") ? 0.55 : 1)
+                        .layoutPriority(1)
+                    TagDots(tags: item.tags)
+                    FileSmarts(item: item, browser: browser, compact: false)
+                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if columns.date {
                 Text(item.modified.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "--")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .frame(width: 136, alignment: .leading)
             }
             if columns.size {
                 Text(sizeText)
                     .monospacedDigit()
+                    .lineLimit(1)
                     .frame(width: 72, alignment: .trailing)
             }
             if columns.kind {
@@ -936,6 +961,7 @@ struct FileSmarts: View {
                 }
                 .buttonStyle(.plain)
                 .help(suggestion.isSure ? "Move it to \(suggestion.folderName)" : "It might belong in \(suggestion.folderName). Click to move it there.")
+                WhyChip(why: suggestion.why)
             }
         }
     }
@@ -967,11 +993,15 @@ struct FileIconsView: View {
                     }
                 }
                 .padding(12)
+                .fileDragContainer(browser)
             }
             .contentShape(Rectangle())
             .onTapGesture { FileClicks.clickedBackground(browser: browser, area: area, model: model) }
             .onChange(of: browser.cursor) { _, cursor in
                 if let cursor { proxy.scrollTo(cursor) }
+            }
+            .onChange(of: browser.revealRequests) {
+                if let cursor = browser.cursor { proxy.scrollTo(cursor, anchor: .center) }
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { newWidth in
@@ -1014,14 +1044,24 @@ struct FileIconCell: View {
                 }
             }
             .frame(width: area.iconSize.picture.width, height: area.iconSize.picture.height)
-            Text(item.name)
-                .font(.system(size: 11.5))
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .multilineTextAlignment(.center)
+            if browser.renaming == item.id {
+                InlineNameField(name: item.name, isFolder: item.isFolder, alignment: .center) { newName in
+                    FilesActions.finishRename(item, newName: newName, browser: browser, model: model)
+                }
+                .frame(height: 20)
                 .padding(.horizontal, 4)
-                .padding(.vertical, 1)
-                .background(selected ? NylaStyle.brass.opacity(0.3) : Color.clear, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            } else {
+                Text(item.name)
+                    .font(.system(size: 11.5))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(selected ? NylaStyle.brass.opacity(0.3) : Color.clear, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .opacity(item.name.hasPrefix(".") ? 0.55 : 1)
+                TagDots(tags: item.tags)
+            }
             FileSmarts(item: item, browser: browser, compact: true)
                 .scaleEffect(0.9)
         }
@@ -1046,8 +1086,8 @@ struct FileIconCell: View {
 
 // MARK: - Dragging
 
-/// Files dragged inside EchoNyla: a drag carries one file to other apps, but dropping it on a
-/// folder here moves every file that was selected with it.
+/// Files dragged inside EchoNyla. The drag itself carries every selected file (to Finder, Mail or any
+/// app); this also remembers them for drops whose sender hands over only one.
 @MainActor
 enum FileDragBoard {
     private static var dragged: [URL] = []
@@ -1073,6 +1113,16 @@ enum FileDragBoard {
 }
 
 extension View {
+    /// The list or icons of one side: a drag that starts on a selected file carries every selected file.
+    func fileDragContainer(_ browser: FileBrowser) -> some View {
+        dragContainer(for: URL.self, itemID: \URL.path) { ids in
+            let urls = ids.map { URL(fileURLWithPath: $0) }
+            FileDragBoard.begin(urls)
+            return urls
+        }
+        .dragContainerSelection(Array(browser.selection))
+    }
+
     /// Drag the file (with the rest of the selection) and, on a folder, drop files into it.
     func fileDragAndDrop(_ item: BrowserItem, browser: FileBrowser, targeted: Binding<Bool>) -> some View {
         modifier(FileDragAndDrop(item: item, browser: browser, targeted: targeted))
@@ -1087,11 +1137,9 @@ struct FileDragAndDrop: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        let dragging = content.onDrag {
-            let urls = browser.selection.contains(item.id) ? browser.selectedURLs : [item.url]
-            FileDragBoard.begin(urls)
-            return NSItemProvider(contentsOf: item.url) ?? NSItemProvider()
-        }
+        // Each file is an item of the list's drag container, so dragging a selected file drags the
+        // whole selection, as in Finder.
+        let dragging = content.draggable(containerItemID: item.id)
         if item.isFolder {
             dragging.dropDestination(for: URL.self) { urls, _ in
                 model.moveItems(FileDragBoard.expand(urls), into: item.url)
@@ -1138,7 +1186,7 @@ struct FileMenu: View {
             }
         }
         Divider()
-        Button("Rename…") { browser.renaming = item.id }
+        Button("Rename") { FilesActions.rename(item.id, in: browser) }
         Menu("Move To") {
             ForEach(model.favoriteFolders) { folder in
                 Button(folder.name) { model.moveItems(targets, toFavorite: folder.id) }
@@ -1164,6 +1212,7 @@ struct FileMenu: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.writeObjects(targets as [NSURL])
         }
+        Button("Copy Path") { model.copyPaths(targets) }
         Button("Move to Trash") { model.trashItems(targets) }
     }
 
@@ -1187,10 +1236,15 @@ struct FileMenu: View {
 @Observable
 final class FilesKeys {
     static let shared = FilesKeys()
-    /// Bumped to put the cursor in the search box (⌘F) or ask for a new folder (⇧⌘N).
+    /// Bumped to put the cursor in the search box (⌘F).
     var searchRequests = 0
-    var newFolderRequests = 0
     @ObservationIgnored private var monitor: Any?
+    /// Letters typed to jump to a name, and when the last one was typed.
+    @ObservationIgnored private var typed = ""
+    @ObservationIgnored private var typedAt = Date.distantPast
+
+    /// In the middle of typing a name: Space is part of it, not Quick Look.
+    var isTypingName: Bool { !typed.isEmpty && Date().timeIntervalSince(typedAt) < TypeSelect.pause }
 
     func start() {
         guard monitor == nil else { return }
@@ -1222,10 +1276,11 @@ final class FilesKeys {
             return true
         }
         if flags == [.command, .shift], key == "n" {
-            newFolderRequests += 1
+            if typing { window.makeFirstResponder(nil) }
+            FilesActions.newFolder(in: browser, model: model)
             return true
         }
-        if event.keyCode == 53, typing, !browser.filterText.isEmpty || browser.searchResults != nil {
+        if event.keyCode == 53, typing, browser.renaming == nil, !browser.filterText.isEmpty || browser.searchResults != nil {
             browser.filterText = ""
             browser.clearSearch()
             window.makeFirstResponder(nil)
@@ -1233,6 +1288,9 @@ final class FilesKeys {
         }
         guard !typing else { return false }
 
+        if event.keyCode == 49, flags.isEmpty, isTypingName {
+            return typeSelect(" ", browser: browser, area: area)
+        }
         let order = FilesLayout.order(browser, area: area, model: model)
         let plain = flags.isEmpty
         let shift = flags == [.shift]
@@ -1254,7 +1312,10 @@ final class FilesKeys {
             for item in all where browser.selection.contains(item.id) { FileClicks.open(item, browser: browser) }
         case 36 where plain, 76 where plain:
             guard browser.selection.count == 1, let id = browser.selection.first else { return false }
-            browser.renaming = id
+            FilesActions.rename(id, in: browser)
+        case 47 where flags == [.command, .shift]:
+            area.showsHidden.toggle()
+            model.note(area.showsHidden ? "Showing hidden files. ⇧⌘. hides them again." : "Hidden files are hidden again.")
         case 51 where flags == [.command], 117 where flags == [.command]:
             let urls = browser.selectedURLs
             guard !urls.isEmpty else { return false }
@@ -1293,7 +1354,17 @@ final class FilesKeys {
             }
             return true
         }
-        guard flags.isEmpty, key.count == 1, let digit = Int(key) else { return false }
+        if flags == [.command, .option] {
+            switch key {
+            case "v": model.pasteFiles(into: browser.folder, moving: true)
+            case "c": model.copyPaths(browser.selectedURLs)
+            default: return false
+            }
+            return true
+        }
+        guard flags.isEmpty || flags == [.shift], key.count == 1 else { return false }
+        // Typing a name jumps to it. Digits send files to your folders, unless you're already typing a name.
+        guard let digit = Int(key), flags.isEmpty, !isTypingName else { return typeSelect(key, browser: browser, area: area) }
         if digit == 0 {
             select(nextAfter(Set(browser.selection), order: order))
             return true
@@ -1301,6 +1372,18 @@ final class FilesKeys {
         let folders = model.quickSortFolders
         guard digit >= 1, digit <= folders.count else { return false }
         sendSelection(toFavorite: folders[digit - 1].id)
+        return true
+    }
+
+    /// Jumps to the first name starting with what was typed (letters typed close together build a word).
+    private func typeSelect(_ key: String, browser: FileBrowser, area: FilesArea) -> Bool {
+        guard TypeSelect.types(key, continuing: isTypingName) else { return false }
+        let now = Date()
+        typed = now.timeIntervalSince(typedAt) < TypeSelect.pause ? typed + key : key
+        typedAt = now
+        let items = FilesLayout.groups(browser, area: area, model: model).flatMap(\.items).map { (id: $0.id, name: $0.name) }
+        guard let id = TypeSelect.match(typed, in: items) else { return true }
+        select(id)
         return true
     }
 
@@ -1351,5 +1434,121 @@ final class FilesKeys {
     private func syncPane() {
         let browser = model.files.active
         model.select(browser.cursor.map { URL(fileURLWithPath: $0) }, count: max(browser.selection.count, 1))
+    }
+}
+
+// MARK: - Renaming in the list
+
+/// A file's name as a text box, as in Finder: the part before the extension is selected, Return or a
+/// click elsewhere keeps the new name, Esc leaves the old one. `done` gets nil for Esc.
+struct InlineNameField: NSViewRepresentable {
+    let name: String
+    let isFolder: Bool
+    let alignment: NSTextAlignment
+    let done: (String?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(done: done) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: name)
+        field.delegate = context.coordinator
+        field.font = .systemFont(ofSize: 12.5)
+        field.alignment = alignment
+        field.isBezeled = false
+        field.isBordered = true
+        field.drawsBackground = true
+        field.backgroundColor = .textBackgroundColor
+        field.focusRingType = .exterior
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byClipping
+        field.cell?.isScrollable = true
+        field.cell?.wraps = false
+        field.setAccessibilityLabel("New name")
+        let stem = RenameSelection.stemLength(of: name, isFolder: isFolder)
+        // After SwiftUI has placed the box: take the typing cursor and select the name before the extension.
+        DispatchQueue.main.async {
+            guard let window = field.window else { return }
+            window.makeFirstResponder(field)
+            field.currentEditor()?.selectedRange = NSRange(location: 0, length: stem)
+        }
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.done = done
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var done: (String?) -> Void
+        private var finished = false
+
+        init(done: @escaping (String?) -> Void) {
+            self.done = done
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            if selector == #selector(NSResponder.insertNewline(_:)) {
+                finish(control.stringValue)
+                control.window?.makeFirstResponder(nil)
+                return true
+            }
+            if selector == #selector(NSResponder.cancelOperation(_:)) {
+                finish(nil)
+                control.window?.makeFirstResponder(nil)
+                return true
+            }
+            return false
+        }
+
+        /// Clicking somewhere else keeps the new name, as in Finder.
+        func controlTextDidEndEditing(_ notification: Notification) {
+            finish((notification.object as? NSTextField)?.stringValue)
+        }
+
+        private func finish(_ text: String?) {
+            guard !finished else { return }
+            finished = true
+            done(text)
+        }
+    }
+}
+
+// MARK: - Finder tags
+
+/// A file's Finder tags as small dots in its colours (grey for tags without one), as in Finder's list.
+struct TagDots: View {
+    let tags: [String]
+
+    var body: some View {
+        if !tags.isEmpty {
+            HStack(spacing: -3) {
+                ForEach(Array(tags.prefix(3).enumerated()), id: \.offset) { _, tag in
+                    Circle()
+                        .fill(FinderTagColor.color(for: tag))
+                        .overlay(Circle().strokeBorder(NylaStyle.surface, lineWidth: 1))
+                        .frame(width: 9, height: 9)
+                }
+            }
+            .help("Tags: " + tags.joined(separator: ", "))
+            .accessibilityLabel("Tags: " + tags.joined(separator: ", "))
+        }
+    }
+}
+
+/// Finder's seven colour tags by name (in your Mac's language); other tags are grey.
+@MainActor
+enum FinderTagColor {
+    private static let byName: [String: NSColor] = {
+        var colors: [String: NSColor] = [:]
+        let workspace = NSWorkspace.shared
+        for (index, label) in workspace.fileLabels.enumerated() where index > 0 && index < workspace.fileLabelColors.count {
+            colors[label.lowercased()] = workspace.fileLabelColors[index]
+        }
+        return colors
+    }()
+
+    static func color(for tag: String) -> Color {
+        byName[tag.lowercased()].map { Color(nsColor: $0) } ?? Color.secondary.opacity(0.6)
     }
 }

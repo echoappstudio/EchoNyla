@@ -142,7 +142,9 @@ public enum ModelDecisionCheck {
     public static func check(_ answer: ModelAnswer, facts: FileFacts, destinations: [Destination], locked: Set<String>,
                              bar: ConfidenceBar = .standard, captured: Date? = nil, calendar: Calendar = .current) -> ModelDecision {
         let named = DecisionCheck.destination(for: answer.folder, destinations: destinations, locked: locked)
-        let summary = DecisionCheck.oneLine(answer.whatItIs, limit: 300, fallback: "")
+        // Long numbers reach the model as "#####"; it sometimes copies them back. They're taken out of
+        // the description, and a name with them is no name at all (the real digits are unknown).
+        let summary = DecisionCheck.oneLine(TextTools.removeNumberMasks(answer.whatItIs), limit: 300, fallback: "")
         let evidence = Evidence(facts: facts, description: summary)
         // Words EchoNyla already knows the spelling of: folder names and notes, and the file's own text.
         let vocabulary = destinations.flatMap { [$0.name, $0.purpose ?? ""] } + [facts.text, facts.speech] + facts.imageLabels + facts.names
@@ -162,7 +164,7 @@ public enum ModelDecisionCheck {
         } else {
             reason = "No folder fits this file."
         }
-        let proposedName = answer.nameConfidence >= bar.nameShown
+        let proposedName = answer.nameConfidence >= bar.nameShown && !TextTools.hasNumberMask(answer.name)
             ? SmartName.make(title: title, original: facts.fileName, kind: facts.kind, captured: captured ?? facts.modified,
                              text: facts.text, calendar: calendar)
             : nil

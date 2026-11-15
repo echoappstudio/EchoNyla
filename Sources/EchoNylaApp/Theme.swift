@@ -4,7 +4,8 @@ import SwiftUI
 
 /// The colours of the skin in use (Signature by default; see `SkinStore`). Reading them while a
 /// view draws makes the view redraw when the skin changes. The names keep their old "brass" wording:
-/// `brass` is the skin's accent.
+/// `brass` is the skin's accent. Views read these while they draw, on the main thread.
+@MainActor
 enum NylaStyle {
     private static var palette: SkinPalette { SkinStore.shared.palette }
 
@@ -424,6 +425,7 @@ struct ActivityRow: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                    if let why = SuggestionWhy.from(reason: entry.detail) { WhyChip(why: why) }
                     renameHint
                 }
                 Spacer(minLength: 4)
@@ -490,10 +492,13 @@ struct ActivityRow: View {
             leadingIcon(size: 38)
             VStack(alignment: .leading, spacing: 5) {
                 nameLine
-                Text(entry.detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if let why = SuggestionWhy.from(reason: entry.detail) { WhyChip(why: why) }
+                    Text(entry.detail)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 renameHint
                 if let summary = entry.summary, !summary.isEmpty {
                     Text(summary)
@@ -736,5 +741,24 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+/// Where a suggestion came from, as a small grey tag ("Your rule", "Learned from 4 moves"); the
+/// tooltip gives the whole reason.
+struct WhyChip: View {
+    let why: SuggestionWhy
+
+    var body: some View {
+        Text(why.label)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(NylaStyle.wash(0.08), in: Capsule())
+            .help(why.detail)
+            .accessibilityLabel("Why: \(why.label)")
     }
 }

@@ -2,6 +2,11 @@ import AppKit
 import EchoNylaCore
 import Foundation
 import Observation
+import os
+
+/// How long reading and laying out a folder takes (counts and milliseconds only, never names):
+/// `log stream --predicate 'subsystem == "com.echoapps.echonyla"'`.
+let filesTiming = Logger(subsystem: "com.echoapps.echonyla", category: "files")
 
 enum BrowserViewMode: String, CaseIterable {
     case list, icons
@@ -48,7 +53,11 @@ final class FilesArea {
     var isSplit = false {
         didSet {
             if !isSplit { activeIndex = 0 }
-            if isSplit, sides.count < 2 { sides.append(FileBrowser(start: sides[0].folder)) }
+            if isSplit, sides.count < 2 {
+                let other = FileBrowser(start: sides[0].folder)
+                other.showsHidden = showsHidden
+                sides.append(other)
+            }
         }
     }
     var sort: BrowserSort {
@@ -63,6 +72,16 @@ final class FilesArea {
     var iconSize: IconSize {
         didSet { UserDefaults.standard.set(iconSize.rawValue, forKey: AppModel.Keys.filesIconSize) }
     }
+    /// Files whose names start with a dot, shown dimmed (⇧⌘. as in Finder).
+    var showsHidden: Bool {
+        didSet {
+            UserDefaults.standard.set(showsHidden, forKey: AppModel.Keys.filesShowsHidden)
+            for side in sides {
+                side.showsHidden = showsHidden
+                side.reload()
+            }
+        }
+    }
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -73,6 +92,8 @@ final class FilesArea {
         grouping = defaults.string(forKey: AppModel.Keys.filesGrouping).flatMap(BrowserGrouping.init(rawValue:)) ?? .none
         viewMode = defaults.string(forKey: AppModel.Keys.filesViewMode).flatMap(BrowserViewMode.init(rawValue:)) ?? .list
         iconSize = defaults.string(forKey: AppModel.Keys.filesIconSize).flatMap(IconSize.init(rawValue:)) ?? .small
+        showsHidden = defaults.bool(forKey: AppModel.Keys.filesShowsHidden)
+        sides[0].showsHidden = showsHidden
     }
 
     var active: FileBrowser { sides[min(activeIndex, visibleSides.count - 1)] }
@@ -99,7 +120,9 @@ final class FilesArea {
 final class FileBrowser: Identifiable {
     let id = UUID()
     private(set) var history: BrowserHistory
-    private(set) var items: [BrowserItem] = []
+    private(set) var items: [BrowserItem] = [] {
+        didSet { listVersion &+= 1 }
+    }
     private(set) var isLoading = false
     private(set) var loadError: String?
     /// macOS keeps EchoNyla out of this folder; this is the switch that lets it in.
@@ -111,14 +134,23 @@ final class FileBrowser: Identifiable {
     var cursor: String?
     var filterText = ""
     /// Plain-words search results in this folder; nil when not searching.
-    private(set) var searchResults: [BrowserItem]?
+    private(set) var searchResults: [BrowserItem]? {
+        didSet { listVersion &+= 1 }
+    }
     private(set) var isSearching = false
     private(set) var searchNote: String?
     private(set) var folderSizes: [String: Int64] = [:]
     private(set) var copies: [String: String] = [:]
     private(set) var usedInstallers: Set<String> = []
-    /// A file being renamed (its path), for the rename box.
+    /// A file being renamed (its path): its name turns into a text box in the list.
     var renaming: String?
+    /// Hidden files are listed too.
+    @ObservationIgnored var showsHidden = false
+    /// A file that isn't in the list yet (just made or renamed): once the folder is read again, the
+    /// list scrolls to it.
+    @ObservationIgnored var revealAfterLoad: String?
+    /// Bumped when the list should scroll to the cursor.
+    private(set) var revealRequests = 0
     /// How many icons fit across, for the arrow keys.
     @ObservationIgnored var iconColumns = 4
 
@@ -127,7 +159,21 @@ final class FileBrowser: Identifiable {
     @ObservationIgnored private var watcher: DispatchSourceFileSystemObject?
     @ObservationIgnored private var reloadTask: Task<Void, Never>?
     @ObservationIgnored private let searcher = FileSearcher()
+    /// Counts searches, so an older one that finishes late doesn't replace a newer one's results.
+    @ObservationIgnored private var searchRun = 0
     @ObservationIgnored private var loadedPath: String?
+    /// Bumped whenever the folder's items or the search results change, so the sorted and grouped
+    /// list is only worked out again when something it depends on changed.
+    @ObservationIgnored private var listVersion = 0
+    @ObservationIgnored private var layoutCache: (key: LayoutKey, groups: [BrowserGroup])?
+
+    struct LayoutKey: Equatable {
+        let list: Int
+        let filter: String
+        let sort: BrowserSort
+        let grouping: BrowserGrouping
+        let insights: Int
+    }
 
     init(start: URL) {
         history = BrowserHistory(start: start.standardizedFileURL.path)
@@ -145,6 +191,28 @@ final class FileBrowser: Identifiable {
         let base = searchResults ?? items
         let filtered = searchResults == nil && !filterText.isEmpty ? base.filter { NameFilter.matches($0.name, filterText) } : base
         return sort.sorted(filtered)
+    }
+
+    /// The list as the screen and the keys see it: filtered, sorted and grouped. Worked out once per
+    /// change instead of on every redraw and key press (sorting thousands of names took a moment each time).
+    func layout(sort: BrowserSort, grouping: BrowserGrouping, insightsVersion: Int,
+                category: (BrowserItem) -> FileCategory) -> [BrowserGroup] {
+        // Reading these tells SwiftUI the list depends on them.
+        _ = items
+        _ = searchResults
+        let key = LayoutKey(list: listVersion, filter: searchResults == nil ? filterText : "", sort: sort, grouping: grouping,
+                            insights: grouping == .meaning ? insightsVersion : 0)
+        if let layoutCache, layoutCache.key == key { return layoutCache.groups }
+        let started = ContinuousClock.now
+        let groups = BrowserGroups.make(shown(sort: sort), by: grouping, category: category)
+        layoutCache = (key, groups)
+        filesTiming.info("Sorted and grouped \(groups.reduce(0) { $0 + $1.items.count }) items in \(Self.milliseconds(since: started)) ms")
+        return groups
+    }
+
+    nonisolated static func milliseconds(since start: ContinuousClock.Instant) -> Int {
+        let elapsed = ContinuousClock.now - start
+        return Int(elapsed.components.seconds * 1_000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
     }
 
     var selectedURLs: [URL] {
@@ -188,6 +256,7 @@ final class FileBrowser: Identifiable {
         cursor = nil
         anchor = nil
         filterText = ""
+        renaming = nil
         clearSearch()
         items = []
         folderSizes = [:]
@@ -215,8 +284,13 @@ final class FileBrowser: Identifiable {
         loadError = nil
         blocked = nil
         watch(path)
+        let hidden = showsHidden
         loadTask = Task { @MainActor in
-            let result = await Task.detached(priority: .userInitiated) { Self.list(path) }.value
+            let started = ContinuousClock.now
+            let result = await Task.detached(priority: .userInitiated) { Self.list(path, showsHidden: hidden) }.value
+            if case .success(let listed) = result {
+                filesTiming.info("Read \(listed.count) items in \(Self.milliseconds(since: started)) ms")
+            }
             guard !Task.isCancelled, path == history.current else { return }
             isLoading = false
             switch result {
@@ -226,6 +300,10 @@ final class FileBrowser: Identifiable {
                 let ids = Set(listed.map(\.id))
                 selection = selection.filter { ids.contains($0) }
                 if let cursor, !ids.contains(cursor) { self.cursor = nil }
+                if let reveal = revealAfterLoad, ids.contains(reveal) {
+                    revealAfterLoad = nil
+                    revealRequests += 1
+                }
                 findExtras(listed, folder: path)
             case .failure(let message):
                 items = []
@@ -244,12 +322,12 @@ final class FileBrowser: Identifiable {
         case blocked
     }
 
-    nonisolated static func list(_ path: String) -> ListResult {
+    nonisolated static func list(_ path: String, showsHidden: Bool = false) -> ListResult {
         let folder = URL(fileURLWithPath: path, isDirectory: true)
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey,
-                                      .addedToDirectoryDateKey, .localizedTypeDescriptionKey]
+        let keys = listKeys
         do {
-            let urls = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+            let urls = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys,
+                                                                   options: showsHidden ? [] : [.skipsHiddenFiles])
             return .success(urls.map { item(for: $0, keys: keys) })
         } catch {
             let nsError = error as NSError
@@ -262,17 +340,27 @@ final class FileBrowser: Identifiable {
     }
 
     nonisolated static func item(for url: URL, keys: [URLResourceKey]? = nil) -> BrowserItem {
-        let wanted = keys ?? [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey,
-                              .addedToDirectoryDateKey, .localizedTypeDescriptionKey]
+        let wanted = keys ?? listKeys
         let values = try? url.resourceValues(forKeys: Set(wanted))
         let isFolder = values?.isDirectory == true && values?.isPackage != true
+        let name = url.lastPathComponent
+        // Spotlight is asked only when it can change what the list shows (one trip per file was the
+        // slowest part of opening a big folder).
+        let askLastOpened = !isFolder && ListingCheck.needsLastOpened(modified: values?.contentModificationDate,
+                                                                        added: values?.addedToDirectoryDate)
         return BrowserItem(path: url.standardizedFileURL.path, isFolder: isFolder,
                            byteCount: isFolder ? nil : values?.fileSize.map { Int64($0) },
                            modified: values?.contentModificationDate, created: values?.creationDate,
-                           added: values?.addedToDirectoryDate, lastOpened: isFolder ? nil : FileDetails.lastOpened(url),
+                           added: values?.addedToDirectoryDate, lastOpened: askLastOpened ? FileDetails.lastOpened(url) : nil,
                            kindText: values?.localizedTypeDescription ?? (isFolder ? "Folder" : ""),
-                           isScreenshot: !isFolder && ScreenshotMetadata.isScreenCapture(at: url))
+                           isScreenshot: !isFolder && ListingCheck.mayBeScreenshot(fileName: name) && ScreenshotMetadata.isScreenCapture(at: url),
+                           tags: values?.tagNames ?? [])
     }
+
+    /// What listing a folder reads about each item, in one go.
+    nonisolated static let listKeys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey,
+                                                         .creationDateKey, .addedToDirectoryDateKey, .localizedTypeDescriptionKey,
+                                                         .tagNamesKey]
 
     /// In the background, after the list shows: how big each folder inside is, which files are
     /// exact copies of each other (checked byte for byte) and which installers are already installed.
@@ -282,40 +370,59 @@ final class FileBrowser: Identifiable {
         let installers = listed.filter { $0.url.pathExtension.lowercased() == "dmg" }.map(\.url)
         let folders = listed.filter(\.isFolder).map(\.url)
         extrasTask = Task { @MainActor in
-            let found = await Task.detached(priority: .utility) { () -> (copies: [String: String], installers: Set<String>) in
-                var copies: [String: String] = [:]
-                for group in ExactCopy.groups(files) {
-                    let modified = Dictionary(uniqueKeysWithValues: group.map {
-                        ($0.path, (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast)
-                    })
-                    guard let keep = DuplicateFinder.keeper(group.map(\.path), modified: modified) else { continue }
-                    let keepName = URL(fileURLWithPath: keep).lastPathComponent
-                    for copy in group where copy.path != keep { copies[copy.path] = keepName }
-                }
-                var used: Set<String> = []
-                if !installers.isEmpty {
-                    let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
-                    let apps = (try? FileManager.default.contentsOfDirectory(at: applications, includingPropertiesForKeys: nil,
-                                                                              options: [.skipsHiddenFiles])) ?? []
-                    let policy = TrashPolicy()
-                    for installer in installers where policy.suggestion(for: installer, downloadsFolder: installer.deletingLastPathComponent(),
-                                                                       applicationsFolder: applications, installedApps: apps) != nil {
-                        used.insert(installer.standardizedFileURL.path)
-                    }
-                }
-                return (copies, used)
-            }.value
+            let found = await Self.findCopies(files: files, installers: installers)
             guard !Task.isCancelled, path == history.current else { return }
             copies = found.copies
             usedInstallers = found.installers
+            // Sizes already worked out show at once; the rest are added up one folder at a time.
+            var known: [String: Int64] = [:]
+            var unknown: [URL] = []
             for folder in folders {
+                if let size = FolderSizeCache.size(of: folder) { known[folder.standardizedFileURL.path] = size } else { unknown.append(folder) }
+            }
+            if !known.isEmpty { folderSizes.merge(known) { _, new in new } }
+            for folder in unknown {
                 guard !Task.isCancelled, path == history.current else { return }
-                if let size = await Task.detached(priority: .utility, operation: { FolderSize.total(of: folder) }).value {
+                if let size = await Self.addUp(folder) {
                     guard !Task.isCancelled, path == history.current else { return }
+                    FolderSizeCache.store(size, for: folder)
                     folderSizes[folder.standardizedFileURL.path] = size
                 }
             }
         }
+    }
+
+    /// Exact copies (checked byte for byte) and installers of apps already in Applications, away from
+    /// the screen's thread. Stops when the folder is left.
+    @concurrent
+    nonisolated private static func findCopies(files: [URL], installers: [URL]) async -> (copies: [String: String], installers: Set<String>) {
+        var copies: [String: String] = [:]
+        for group in ExactCopy.groups(files, isCancelled: { Task.isCancelled }) {
+            let modified = Dictionary(uniqueKeysWithValues: group.map {
+                ($0.path, (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast)
+            })
+            guard let keep = DuplicateFinder.keeper(group.map(\.path), modified: modified) else { continue }
+            let keepName = URL(fileURLWithPath: keep).lastPathComponent
+            for copy in group where copy.path != keep { copies[copy.path] = keepName }
+        }
+        var used: Set<String> = []
+        if !installers.isEmpty, !Task.isCancelled {
+            let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
+            let apps = (try? FileManager.default.contentsOfDirectory(at: applications, includingPropertiesForKeys: nil,
+                                                                      options: [.skipsHiddenFiles])) ?? []
+            let policy = TrashPolicy()
+            for installer in installers where policy.suggestion(for: installer, downloadsFolder: installer.deletingLastPathComponent(),
+                                                               applicationsFolder: applications, installedApps: apps) != nil {
+                used.insert(installer.standardizedFileURL.path)
+            }
+        }
+        return (copies, used)
+    }
+
+    /// Adds up a folder away from the screen's thread, and stops when the folder is left.
+    @concurrent
+    nonisolated private static func addUp(_ folder: URL) async -> Int64? {
+        FolderSize.total(of: folder, isCancelled: { Task.isCancelled })
     }
 
     // MARK: Watching the folder
@@ -368,6 +475,8 @@ final class FileBrowser: Identifiable {
         isSearching = true
         searchNote = nil
         let scope = folder
+        searchRun += 1
+        let run = searchRun
         Task { @MainActor in
             var request = SpotlightQuery.fallbackRequest(from: clean)
             var usedAI = false
@@ -382,12 +491,13 @@ final class FileBrowser: Identifiable {
                 return
             }
             let results = await searcher.run(query, in: scope, limit: 300)
-            guard scope == folder else { return }
+            guard run == searchRun, scope == folder else { return }
             // Photos and recordings have no words for Spotlight; EchoNyla's own look at them does.
             let spotlightPaths = Set(results.map { $0.url.standardizedFileURL.path })
             let understood = model.understoodFiles(matching: request, besides: spotlightPaths, limit: 300 - results.count, in: scope)
             let urls = results.map(\.url) + understood.map(\.url)
             let found = await Task.detached(priority: .userInitiated) { urls.map { Self.item(for: $0) } }.value
+            guard run == searchRun, scope == folder else { return }
             searchResults = found
             isSearching = false
             selection = []
@@ -396,8 +506,38 @@ final class FileBrowser: Identifiable {
     }
 
     func clearSearch() {
+        searchRun += 1
         searchResults = nil
         searchNote = nil
         isSearching = false
+    }
+}
+
+/// Folder sizes worked out while EchoNyla runs, so going back to a folder doesn't add everything
+/// up again. A size is kept 10 minutes, and only while the folder itself hasn't changed.
+@MainActor
+enum FolderSizeCache {
+    private struct Entry {
+        let size: Int64
+        let modified: Date?
+        let measured: Date
+    }
+
+    private static var entries: [String: Entry] = [:]
+    static let lifetime: TimeInterval = 600
+
+    static func size(of folder: URL) -> Int64? {
+        guard let entry = entries[folder.standardizedFileURL.path], Date().timeIntervalSince(entry.measured) < lifetime,
+              entry.modified == modified(folder) else { return nil }
+        return entry.size
+    }
+
+    static func store(_ size: Int64, for folder: URL) {
+        if entries.count > 2_000 { entries = entries.filter { Date().timeIntervalSince($0.value.measured) < lifetime } }
+        entries[folder.standardizedFileURL.path] = Entry(size: size, modified: modified(folder), measured: Date())
+    }
+
+    private static func modified(_ folder: URL) -> Date? {
+        (try? folder.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 }

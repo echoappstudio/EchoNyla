@@ -90,7 +90,7 @@ enum OnDeviceModel {
             let schema = try fileSchema(folderNames: question.folderNames)
             let text = ModelPrompt.question(facts: question.facts, currentFolderName: question.currentFolderName,
                                             examples: question.examples, hasPicture: question.picture != nil)
-            let options = GenerationOptions(sampling: .greedy, temperature: nil, maximumResponseTokens: 300)
+            let options = GenerationOptions(samplingMode: .greedy, temperature: nil, maximumResponseTokens: 300)
             let content: GeneratedContent
             if #available(macOS 27, *), let picture = question.picture {
                 content = try await session.respond(schema: schema, options: options) {

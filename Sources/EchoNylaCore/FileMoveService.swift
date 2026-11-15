@@ -1,6 +1,6 @@
 import Foundation
 
-public struct FileMoveReceipt: Codable, Equatable {
+public struct FileMoveReceipt: Codable, Equatable, Sendable {
     public let originalURL: URL
     public let movedURL: URL
 
@@ -10,7 +10,7 @@ public struct FileMoveReceipt: Codable, Equatable {
     }
 }
 
-public struct MoveBatchReceipt: Codable, Equatable {
+public struct MoveBatchReceipt: Codable, Equatable, Sendable {
     public let moves: [FileMoveReceipt]
     /// Contains only folders EchoNyla itself created for this approved batch.
     public let createdFolders: [URL]

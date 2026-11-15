@@ -20,6 +20,7 @@ extension NSColor {
 ///
 /// Verbyn's six skins, each light and dark. By default Signature, light or dark with the Mac.
 /// Skins change colours and the icon only.
+@MainActor
 @Observable
 final class SkinStore {
     static let shared = SkinStore()

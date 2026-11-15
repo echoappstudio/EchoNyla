@@ -292,7 +292,7 @@ enum SpokenWords {
         if let end = try await analyzer.analyzeSequence(from: audio) {
             try await analyzer.finalizeAndFinish(through: end)
         } else {
-            try? await analyzer.cancelAndFinishNow()
+            await analyzer.cancelAndFinishNow()
         }
         return TextTools.collapseWhitespace(try await words)
     }

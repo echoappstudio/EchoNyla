@@ -40,7 +40,8 @@ struct MainWindowView: View {
         .background(WindowBackground().ignoresSafeArea())
         .nylaChrome()
         .frame(minWidth: 1000, minHeight: 600)
-        .quickLookPreview($model.quickLookURL)
+        .quickLookPreview($model.quickLookURL, in: model.quickLookItems)
+        .onChange(of: model.quickLookURL) { _, url in model.followQuickLook(url) }
         .onAppear {
             FilePreviewKeys.shared.openSelected = { AppModel.shared.quickLookSelected() }
         }
@@ -769,7 +770,10 @@ struct CleanupRowView: View {
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Caption(row.chosenFolder.map { "Your choice: \($0.lastPathComponent)" } ?? row.suggestionReason ?? "No suggestion. Choose a folder.")
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if row.chosenFolder == nil, let why = row.suggestionReason.flatMap(SuggestionWhy.from(reason:)) { WhyChip(why: why) }
+                    Caption(row.chosenFolder.map { "Your choice: \($0.lastPathComponent)" } ?? row.suggestionReason ?? "No suggestion. Choose a folder.")
+                }
                 if let summary = row.summary {
                     Caption(summary)
                 }
@@ -1120,7 +1124,16 @@ struct SettingsTab: View {
             GroupBox("Moving files") {
                 VStack(alignment: .leading, spacing: 8) {
                     SettingToggle("Move files it's sure about by itself (with Undo)", isOn: $model.autoMove)
-                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you. This also applies to Deep Reorganize and Check This Folder.")
+                    Caption("Sure means: one of your rules, a macOS screenshot, the same word in 3+ files you moved to a folder, 3+ files from the same website you moved to one folder, or the model certain about a Sort-into folder, with what's in the file matching that folder better than any other. New folders always wait for you. This also applies to Deep Reorganize and Check This Folder.")
+                    Caption("If you undo a move EchoNyla made by itself, it stops moving files like that one on its own. They wait for you to approve them.")
+                    if !model.learningNos.isEmpty {
+                        HStack(spacing: 8) {
+                            Caption("EchoNyla remembers \(model.learningNos.count) undone move\(model.learningNos.count == 1 ? "" : "s").")
+                            Button("Forget Them") { model.forgetLearningNos() }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                        }
+                    }
                     SettingToggle("Rename files it's sure about by itself (with Undo)", isOn: $model.autoRename)
                     Caption("Only files whose old name said nothing, like IMG_4821 or Untitled 3, and only when most of the new name comes from what's in the file. Turn both of these off and EchoNyla only suggests: nothing is moved or renamed until you approve it.")
                     SettingToggle("Deep Reorganize: move exact copies to Trash by themselves", isOn: $model.trashExactCopies)
