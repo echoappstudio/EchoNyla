@@ -106,7 +106,13 @@ struct FileHoverCardModifier: ViewModifier {
 
     private func showQuickLook() {
         closeCard()
-        if FileManager.default.fileExists(atPath: url.path) { quickLook = url } else { NSSound.beep() }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            NSSound.beep()
+            return
+        }
+        // In Files, Quick Look can step through the folder with the arrow keys.
+        if AppModel.shared.quickLookInFiles(url) { return }
+        quickLook = url
     }
 
     /// The card waits for a short rest, so moving the pointer down a list doesn't flash one for every file.
@@ -187,9 +193,12 @@ struct FileHoverCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !isFolder, let suggestion = model.quickSuggestion(for: url) {
-                Label("Belongs in \(suggestion.folderName)" + (suggestion.isSure ? "" : "?"), systemImage: "folder")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(NylaStyle.brass)
+                HStack(spacing: 6) {
+                    Label("Belongs in \(suggestion.folderName)" + (suggestion.isSure ? "" : "?"), systemImage: "folder")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(NylaStyle.brass)
+                    WhyChip(why: suggestion.why)
+                }
             }
         }
         .padding(12)
@@ -214,6 +223,7 @@ struct FileDetails: Equatable, Sendable {
     var added: Date?
     var lastOpened: Date?
     var isFolder: Bool
+    var tags: [String] = []
 
     /// "PDF document · 2.3 MB · Oct 3, 2026".
     var line: String {
@@ -229,11 +239,12 @@ struct FileDetails: Equatable, Sendable {
 
     static func readNow(_ url: URL) -> FileDetails? {
         let keys: Set<URLResourceKey> = [.localizedTypeDescriptionKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey,
-                                         .addedToDirectoryDateKey, .isDirectoryKey, .isPackageKey]
+                                         .addedToDirectoryDateKey, .isDirectoryKey, .isPackageKey, .tagNamesKey]
         guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
         return FileDetails(kindText: values.localizedTypeDescription ?? "", byteCount: values.fileSize.map { Int64($0) },
                            created: values.creationDate, modified: values.contentModificationDate, added: values.addedToDirectoryDate,
-                           lastOpened: lastOpened(url), isFolder: values.isDirectory == true && values.isPackage != true)
+                           lastOpened: lastOpened(url), isFolder: values.isDirectory == true && values.isPackage != true,
+                           tags: values.tagNames ?? [])
     }
 
     /// When the file was last opened, from Spotlight.
@@ -245,15 +256,20 @@ struct FileDetails: Equatable, Sendable {
 /// "38 files: mostly PDFs and screenshots, newest from today", kept while EchoNyla runs.
 @MainActor
 enum FolderPeeks {
-    private static var cache: [String: String] = [:]
+    /// NSCache lets old entries go a few at a time; emptying a dictionary at a limit made every
+    /// peek in a big folder start over.
+    private static let cache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 400
+        return cache
+    }()
 
     static func summary(of folder: URL) async -> String {
         let modified = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        let key = folder.path + "|" + String(modified?.timeIntervalSince1970 ?? 0)
-        if let cached = cache[key] { return cached }
+        let key = (folder.path + "|" + String(modified?.timeIntervalSince1970 ?? 0)) as NSString
+        if let cached = cache.object(forKey: key) { return cached as String }
         let text = await Task.detached(priority: .userInitiated) { summaryNow(folder) }.value
-        if cache.count >= 200 { cache.removeAll() }
-        cache[key] = text
+        cache.setObject(text as NSString, forKey: key)
         return text
     }
 
@@ -349,6 +365,8 @@ final class FilePreviewKeys {
     /// means the file under the pointer.
     private func openPreview(fromPress: Bool = false) -> Bool {
         guard !(NSApp.keyWindow?.firstResponder is NSText) else { return false }
+        // A space typed in the middle of a name in Files belongs to the name.
+        if !fromPress, AppModel.shared.selectedTab == .files, FilesKeys.shared.isTypingName { return false }
         if let hovered, fromPress || hoveredAt >= selectedAt {
             hovered.open()
             return true
@@ -361,18 +379,27 @@ final class FilePreviewKeys {
 /// Pictures of files for the hover card and the preview pane, from Quick Look, kept while EchoNyla runs.
 @MainActor
 enum FilePeekImages {
-    private static var cache: [String: NSImage] = [:]
+    /// Pictures are let go a few at a time when memory gets tight or the cache is full, instead of
+    /// all at once (which made every picture in a big folder flicker and load again).
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 1_500
+        cache.totalCostLimit = 400 * 1_024 * 1_024
+        return cache
+    }()
 
     /// Nil for files Quick Look can't draw (their icon already says what they are).
     static func image(for url: URL, side: CGFloat = 260) async -> NSImage? {
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        let key = url.path + "|" + String(modified?.timeIntervalSince1970 ?? 0) + "|" + String(Int(side))
-        if let cached = cache[key] { return cached }
+        let key = (url.path + "|" + String(modified?.timeIntervalSince1970 ?? 0) + "|" + String(Int(side))) as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard !Task.isCancelled else { return nil }
         let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: side, height: side),
                                                    scale: NSScreen.main?.backingScaleFactor ?? 2, representationTypes: .thumbnail)
         guard let picture = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request) else { return nil }
-        if cache.count >= 300 { cache.removeAll() }
-        cache[key] = picture.nsImage
-        return picture.nsImage
+        let image = picture.nsImage
+        let pixels = image.representations.map { $0.pixelsWide * $0.pixelsHigh }.max() ?? Int(side * side * 4)
+        cache.setObject(image, forKey: key, cost: pixels * 4)
+        return image
     }
 }

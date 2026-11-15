@@ -28,8 +28,38 @@ extension AppModel {
     @discardableResult
     func quickLookSelected() -> Bool {
         guard selectedTab != .settings, let url = previewURL, fileManager.fileExists(atPath: url.path) else { return false }
+        if quickLookInFiles(url) { return true }
+        quickLookItems = [url]
         quickLookURL = url
         return true
+    }
+
+    /// Quick Look on the Files page steps through the list with the arrow keys, as in Finder: through
+    /// the selected files when several are selected, otherwise through the whole folder. False when
+    /// the file isn't in the list on screen.
+    @discardableResult
+    func quickLookInFiles(_ url: URL) -> Bool {
+        guard selectedTab == .files else { return false }
+        let browser = files.active
+        let ordered = FilesLayout.groups(browser, area: files, model: self).flatMap(\.items)
+        let id = url.standardizedFileURL.path
+        guard ordered.contains(where: { $0.id == id }) else { return false }
+        let chosen = browser.selection.count > 1 && browser.selection.contains(id) ? ordered.filter { browser.selection.contains($0.id) } : ordered
+        quickLookItems = chosen.map(\.url)
+        quickLookURL = chosen.first { $0.id == id }?.url ?? url
+        return true
+    }
+
+    /// Stepping through Quick Look with the arrows moves the selection along, as in Finder.
+    func followQuickLook(_ url: URL?) {
+        guard let url, selectedTab == .files else { return }
+        let browser = files.active
+        let id = url.standardizedFileURL.path
+        guard browser.cursor != id, (browser.searchResults ?? browser.items).contains(where: { $0.id == id }) else { return }
+        if browser.selection.count <= 1 { browser.selection = [id] }
+        browser.cursor = id
+        browser.anchor = id
+        select(url, count: max(browser.selection.count, 1))
     }
 
     func togglePreviewPane() {
@@ -145,28 +175,30 @@ extension AppModel {
 
     /// Where a file belongs, for its row and hover card: what Apple Intelligence said, or else what
     /// your rules and moves say. Nil for files already in one of your favorite folders.
-    func quickSuggestion(for url: URL, isScreenshot: Bool = false) -> (destinationID: String, folderName: String, isSure: Bool)? {
+    typealias QuickSuggestion = (destinationID: String, folderName: String, isSure: Bool, why: SuggestionWhy)
+
+    func quickSuggestion(for url: URL, isScreenshot: Bool = false) -> QuickSuggestion? {
         let folder = url.deletingLastPathComponent().standardizedFileURL.path
         guard !destinations.isEmpty, !isInFavorite(folder) else { return nil }
         if let known = insight(for: url), let id = known.destinationID, let name = destinationName(for: id) {
-            return (id, name, known.folderIsSure)
+            return (id, name, known.folderIsSure, .appleIntelligence(reason: known.reason, isSure: known.folderIsSure))
         }
         guard let ranked = SuggestionEngine.suggestRanked(fileName: url.lastPathComponent, destinations: destinations, rules: rules,
                                                           learning: learning, isScreenCapture: isScreenshot),
               let name = destinationName(for: ranked.suggestion.destinationID) else { return nil }
-        return (ranked.suggestion.destinationID, name, ranked.strength.isSure)
+        return (ranked.suggestion.destinationID, name, ranked.strength.isSure, ranked.why)
     }
 
     /// The same, for a file in a Files list.
-    func quickSuggestion(for item: BrowserItem) -> (destinationID: String, folderName: String, isSure: Bool)? {
+    func quickSuggestion(for item: BrowserItem) -> QuickSuggestion? {
         guard !item.isFolder, !destinations.isEmpty, !isInFavorite(item.url.deletingLastPathComponent().standardizedFileURL.path) else { return nil }
         if let known = insight(for: item), let id = known.destinationID, let name = destinationName(for: id) {
-            return (id, name, known.folderIsSure)
+            return (id, name, known.folderIsSure, .appleIntelligence(reason: known.reason, isSure: known.folderIsSure))
         }
         guard let ranked = SuggestionEngine.suggestRanked(fileName: item.name, destinations: destinations, rules: rules,
                                                           learning: learning, isScreenCapture: item.isScreenshot),
               let name = destinationName(for: ranked.suggestion.destinationID) else { return nil }
-        return (ranked.suggestion.destinationID, name, ranked.strength.isSure)
+        return (ranked.suggestion.destinationID, name, ranked.strength.isSure, ranked.why)
     }
 
     /// Favorite folders by id, where they are now.
@@ -271,7 +303,7 @@ extension AppModel {
                     let name = favoriteFolders.first { $0.id == destinationID }?.name ?? target.lastPathComponent
                     addActivity(ActivityEntry(kind: .moved, fileName: url.lastPathComponent, detail: "Moved in Files", destinationID: destinationID,
                                               destinationName: name, receipt: receipt, filePath: receipt.movedURL.path))
-                    if let destinationID, !isFolder(receipt.movedURL) { remember(fileName: url.lastPathComponent, destinationID: destinationID) }
+                    if let destinationID, !isFolder(receipt.movedURL) { remember(fileName: url.lastPathComponent, destinationID: destinationID, file: receipt.movedURL) }
                     if previewURL?.standardizedFileURL == url { previewURL = receipt.movedURL }
                 } else {
                     let copy = try withAccess(to: target) { try mover.copy(url, to: target) }
@@ -368,11 +400,32 @@ extension AppModel {
         }
     }
 
-    /// Paste (⌘V): copies of the files you copied, in `folder`.
-    func pasteFiles(into folder: URL) {
+    /// A new folder named as Finder names them ("untitled folder", "untitled folder 2"…), ready to
+    /// be renamed in the list.
+    @discardableResult
+    func makeNewFolder(in parent: URL) -> URL? {
+        let names = (try? fileManager.contentsOfDirectory(atPath: parent.path)) ?? []
+        return makeFolder(named: UniqueName.make("untitled folder", taken: Set(names)), in: parent)
+    }
+
+    /// ⌥⌘C: the full paths of the files, one per line, as Finder copies them.
+    func copyPaths(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(urls.map(\.path).joined(separator: "\n"), forType: .string)
+        note(urls.count == 1 ? "Copied the path of \(urls[0].lastPathComponent)." : "Copied \(Self.count(urls.count, "path")).")
+    }
+
+    /// Paste (⌘V): copies of the files you copied, in `folder`. ⌥⌘V moves them here instead, as in
+    /// Finder (with Undo).
+    func pasteFiles(into folder: URL, moving: Bool = false) {
         let urls = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         guard !urls.isEmpty else {
             NSSound.beep()
+            return
+        }
+        if moving {
+            moveItems(urls, into: folder)
             return
         }
         var copied = 0

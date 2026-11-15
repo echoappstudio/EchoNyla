@@ -101,6 +101,10 @@ final class AppModel {
     }
     private(set) var rules: [DestinationRule] = []
     private(set) var learning: [LearningRecord] = []
+    /// Moves EchoNyla made by itself that you undid: like ones wait for you next time.
+    private(set) var learningNos: [LearningNo] = []
+    /// Off while Undo All puts a whole batch back (that's not a "no" to each file).
+    @ObservationIgnored private var undoTeaches = true
     var pending: PendingFile?
     var selectedTab: MainTab = .activity
     var lastMove: MoveBatchReceipt?
@@ -216,6 +220,7 @@ final class AppModel {
         static let folders = "EchoNyla.favoriteFolders.v1"
         static let rules = "EchoNyla.destinationRules.v1"
         static let learning = "EchoNyla.learning.v1"
+        static let learningNos = "EchoNyla.learning.nos.v1"
         static let lastMove = "EchoNyla.lastMove.v1"
         static let activity = "EchoNyla.activity.v1"
         static let watchedFolders = "EchoNyla.watchedFolders.v1"
@@ -242,6 +247,7 @@ final class AppModel {
         static let filesGrouping = "EchoNyla.files.grouping.v1"
         static let filesViewMode = "EchoNyla.files.viewMode.v1"
         static let filesIconSize = "EchoNyla.files.iconSize.v1"
+        static let filesShowsHidden = "EchoNyla.files.showsHidden.v1"
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -273,6 +279,10 @@ final class AppModel {
     @ObservationIgnored private var reorganizeFingerprints: [String: String] = [:]
     @ObservationIgnored private var watchStates: [String: FolderWatchState] = [:]
     @ObservationIgnored private var watchTimer: Timer?
+    /// One per watched folder: macOS says when something arrives or leaves.
+    @ObservationIgnored private var watchSources: [DispatchSourceFileSystemObject] = []
+    @ObservationIgnored private var watchNudge: Task<Void, Never>?
+    @ObservationIgnored private var searchRun = 0
     @ObservationIgnored private var watchScopes: [URL] = []
     @ObservationIgnored private var watchQueue: [URL] = []
     @ObservationIgnored private var isProcessingQueue = false
@@ -294,6 +304,8 @@ final class AppModel {
     var previewSelectionCount = 1
     /// Quick Look for the selected file (Space, or the pane's Quick Look button).
     var quickLookURL: URL?
+    /// The files Quick Look steps through with the arrow keys (the folder's list in Files).
+    var quickLookItems: [URL] = []
     var previewPaneShown: Bool {
         didSet { defaults.set(previewPaneShown, forKey: Keys.previewPane) }
     }
@@ -345,6 +357,7 @@ final class AppModel {
         favoriteFolders = Self.decode([FavoriteFolder].self, key: Keys.folders, defaults: defaults) ?? []
         rules = Self.decode([DestinationRule].self, key: Keys.rules, defaults: defaults) ?? []
         learning = Self.decode([LearningRecord].self, key: Keys.learning, defaults: defaults) ?? []
+        learningNos = Self.decode([LearningNo].self, key: Keys.learningNos, defaults: defaults) ?? []
         lastMove = Self.decode(MoveBatchReceipt.self, key: Keys.lastMove, defaults: defaults)
             ?? Self.decode(FileMoveReceipt.self, key: Keys.lastMove, defaults: defaults).map { MoveBatchReceipt(moves: [$0]) }
         activity = Self.decode([ActivityEntry].self, key: Keys.activity, defaults: defaults) ?? []
@@ -571,6 +584,8 @@ final class AppModel {
         favoriteFolders.removeAll { $0.id == id }
         rules.removeAll { $0.destinationID == id }
         learning.removeAll { $0.destinationID == id }
+        learningNos.removeAll { $0.destinationID == id }
+        persist(learningNos, key: Keys.learningNos)
         persist(favoriteFolders, key: Keys.folders)
         persist(rules, key: Keys.rules)
         persist(learning, key: Keys.learning)
@@ -640,13 +655,34 @@ final class AppModel {
             userError = "Add a favorite folder first (Folders & Rules)."
             return
         }
+        sortInBackground(files, title: "Sorted \(files.count) dropped files")
+    }
+
+    /// Files handed over by Shortcuts or Finder's Services menu: each is handled like a new file in a
+    /// watched folder, so the ones it's sure about move and the rest wait in Activity. Returns how
+    /// many were queued.
+    @discardableResult
+    func sortInBackground(_ urls: [URL], title: String) -> Int {
+        let files = urls.filter { $0.isFileURL && fileManager.fileExists(atPath: $0.path) && !isFolder($0) }
+        guard !files.isEmpty, !destinations.isEmpty else { return 0 }
         for url in files {
             handledPaths.insert(url.path)
             watchQueue.append(url)
         }
-        queueRun = (UUID(), "Sorted \(files.count) dropped files")
-        statusMessage = "Sorting \(files.count) files. Results appear in Activity."
+        queueRun = (UUID(), title)
+        statusMessage = "Sorting \(files.count) file\(files.count == 1 ? "" : "s"). Results appear in Activity."
         processWatchQueue()
+        return files.count
+    }
+
+    /// What a file is, in one sentence: what Apple Intelligence said before, or it looks now. Nil
+    /// when Apple Intelligence is off or can't tell.
+    func describe(_ url: URL) async -> String? {
+        if let known = insight(for: url)?.summary, !known.isEmpty { return known }
+        guard aiReady else { return nil }
+        let facts = await FileInspector.facts(for: url, readContents: readContents)
+        let summary = await judge(url, facts: facts)?.decision.summary ?? ""
+        return summary.isEmpty ? nil : summary
     }
 
     /// Files dropped on a folder's tile in the panel go straight there: your own choice, with Undo,
@@ -789,9 +825,33 @@ final class AppModel {
             guard let receipt = activity[index].receipt else { continue }
             // A rename made after the move is undone together with the move.
             let renamedAfterMove = activity[index].kind == .renamed && movedPaths.contains(receipt.movedURL.path)
-            if receipts.contains(receipt) || renamedAfterMove { activity[index].isUndone = true }
+            if receipts.contains(receipt) || renamedAfterMove {
+                if !activity[index].isUndone { learnFromUndo(activity[index], receipt: receipt) }
+                activity[index].isUndone = true
+            }
         }
         persist(activity, key: Keys.activity)
+    }
+
+    /// An undone move teaches EchoNyla: a move you made yourself is forgotten (you changed your mind),
+    /// and a move it made by itself becomes a "no", so files like it wait for you next time.
+    private func learnFromUndo(_ entry: ActivityEntry, receipt: FileMoveReceipt) {
+        guard undoTeaches, let destinationID = entry.destinationID, entry.kind == .moved || entry.kind == .autoMoved else { return }
+        let name = receipt.originalURL.lastPathComponent
+        let before = learning.count
+        learning.removeAll { $0.destinationID == destinationID && $0.sampleName == name }
+        if learning.count != before { persist(learning, key: Keys.learning) }
+        guard entry.kind == .autoMoved else { return }
+        let host = DownloadSource.hosts(at: receipt.originalURL).first ?? DownloadSource.hosts(at: receipt.movedURL).first
+        learningNos.insert(LearningNo(destinationID: destinationID, fileName: name, host: host), at: 0)
+        if learningNos.count > 200 { learningNos = Array(learningNos.prefix(200)) }
+        persist(learningNos, key: Keys.learningNos)
+    }
+
+    /// Settings → forget the "no"s from undone moves.
+    func forgetLearningNos() {
+        learningNos = []
+        persist(learningNos, key: Keys.learningNos)
     }
 
     /// Waiting files in Activity that have a suggested name.
@@ -899,19 +959,23 @@ final class AppModel {
 
     private func evaluate(_ url: URL) async -> Evaluation {
         let fileName = url.lastPathComponent
+        let host = DownloadSource.hosts(at: url).first
         let local = SuggestionEngine.suggestRanked(fileName: fileName, destinations: destinations, rules: rules, learning: learning,
-                                                   isScreenCapture: ScreenshotMetadata.isScreenCapture(at: url))
+                                                   isScreenCapture: ScreenshotMetadata.isScreenCapture(at: url), sourceHost: host)
         let locked = lockedDestinationIDs
+        // A rule is your own instruction; anything else you undid before waits for you.
+        let nos = local?.strength == .rule ? [] : learningNos
         if AutoMovePolicy.isIgnored(fileName: fileName) || local?.strength.isSure == true || !aiReady || destinations.isEmpty {
             let decision = AutoMovePolicy.decide(fileName: fileName, local: local, ai: nil, aiHadContentEvidence: false,
                                                  autoMoveEnabled: autoMove, locked: locked)
-            return Evaluation(decision: decision, ai: nil)
+            return Evaluation(decision: LearningNo.apply(decision, fileName: fileName, host: host, nos: nos), ai: nil)
         }
         let facts = await FileInspector.facts(for: url, readContents: readContents)
         let judged = await judge(url, facts: facts)
         let backed = facts.hasContentEvidence || judged?.matchesFolder == true
-        let decision = AutoMovePolicy.decide(fileName: fileName, local: local, ai: judged?.decision, aiHadContentEvidence: backed,
-                                             autoMoveEnabled: autoMove, locked: locked)
+        let decided = AutoMovePolicy.decide(fileName: fileName, local: local, ai: judged?.decision, aiHadContentEvidence: backed,
+                                            autoMoveEnabled: autoMove, locked: locked)
+        let decision = LearningNo.apply(decided, fileName: fileName, host: host, nos: nos)
         return Evaluation(decision: decision, ai: judged?.decision, renamesByItself: judged?.renamesByItself == true)
     }
 
@@ -1015,13 +1079,47 @@ final class AppModel {
     func restartWatching() {
         watchTimer?.invalidate()
         watchTimer = nil
+        watchNudge?.cancel()
+        for source in watchSources { source.cancel() }
+        watchSources = []
         for url in watchScopes { url.stopAccessingSecurityScopedResource() }
         watchScopes = []
         watchStates = [:]
         guard isWatching else { return }
         Notifier.shared.requestPermissionIfNeeded(enabled: notificationsEnabled)
         pollWatchedFolders()
-        watchTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { _ in
+        for folder in watchedFolderURLs() {
+            let descriptor = Darwin.open(folder.path, O_EVTONLY)
+            guard descriptor >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete],
+                                                                   queue: .main)
+            source.setEventHandler {
+                MainActor.assumeIsolated { AppModel.shared.watchedFolderChanged() }
+            }
+            source.setCancelHandler { close(descriptor) }
+            source.resume()
+            watchSources.append(source)
+        }
+    }
+
+    /// Something arrived in or left a watched folder: look in half a second (a download writes
+    /// several times as it starts).
+    private func watchedFolderChanged() {
+        watchNudge?.cancel()
+        watchNudge = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            pollWatchedFolders()
+        }
+    }
+
+    /// The next look: every few seconds while a new file is still changing, otherwise once a minute
+    /// as a backstop (macOS reports arrivals as they happen).
+    private func scheduleNextWatchCheck() {
+        watchTimer?.invalidate()
+        guard isWatching else { return }
+        let settling = watchStates.values.contains { $0.isSettling }
+        watchTimer = Timer.scheduledTimer(withTimeInterval: WatchPace.nextCheck(isSettling: settling), repeats: false) { _ in
             Task { @MainActor in AppModel.shared.pollWatchedFolders() }
         }
     }
@@ -1052,6 +1150,7 @@ final class AppModel {
             }
         }
         processWatchQueue()
+        scheduleNextWatchCheck()
     }
 
     /// A new file that left a watched folder without EchoNyla moving it: if the same file (name and
@@ -1298,6 +1397,8 @@ final class AppModel {
 
     /// Undoes every change in one batch. A rename made after a move goes back with the move.
     func undoRun(_ runID: UUID) {
+        undoTeaches = false
+        defer { undoTeaches = true }
         let entries = activity.filter { $0.runID == runID && !$0.isUndone && $0.receipt != nil && $0.kind != .suggested }
         let movedTo = Set(entries.filter { $0.kind != .renamed }.compactMap { $0.receipt?.movedURL.path })
         var undone = 0
@@ -2245,6 +2346,8 @@ final class AppModel {
         guard !clean.isEmpty else { return }
         isSearching = true
         searchNote = nil
+        searchRun += 1
+        let run = searchRun
         Task {
             var request = SpotlightQuery.fallbackRequest(from: clean)
             var usedAI = false
@@ -2259,6 +2362,8 @@ final class AppModel {
                 return
             }
             var results = await searcher.run(query)
+            // A newer search replaced this one.
+            guard run == searchRun else { return }
             results += understoodFiles(matching: request, besides: Set(results.map(\.id)), limit: max(0, 60 - results.count))
             for index in results.indices {
                 results[index].reason = SearchMatch.reason(words: request.words, name: results[index].name,
@@ -2289,6 +2394,21 @@ final class AppModel {
             results.append(SearchResult(url: url, name: url.lastPathComponent, modified: values.contentModificationDate))
         }
         return results
+    }
+
+    /// Find in plain words for Shortcuts: the same search as the Find page, with its own Spotlight query
+    /// so it never cancels a search on screen.
+    func findFiles(_ sentence: String, limit: Int = 60) async -> [URL] {
+        let clean = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return [] }
+        var request = SpotlightQuery.fallbackRequest(from: clean)
+        if aiReady, let understood = try? await OnDeviceModel.search(clean, today: Self.todayText()), !understood.isEmpty {
+            request = understood
+        }
+        guard let query = SpotlightQuery.make(request) else { return [] }
+        let results = await FileSearcher().run(query, limit: limit)
+        let more = understoodFiles(matching: request, besides: Set(results.map(\.id)), limit: max(0, limit - results.count))
+        return (results + more).map(\.url)
     }
 
     static func todayText() -> String {
@@ -2502,10 +2622,13 @@ final class AppModel {
         return try mover.move(source, to: destination)
     }
 
-    func remember(fileName: String, destinationID: String) {
+    func remember(fileName: String, destinationID: String, file: URL? = nil) {
         let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
         let tokens = SuggestionEngine.filenameTokens(fileName)
-        let entry = LearningRecord(fileExtension: ext, tokens: tokens, destinationID: destinationID, sampleName: fileName)
+        // The website it came from (macOS keeps that on the file wherever it goes).
+        let placed = file ?? resolvedURL(for: destinationID)?.appendingPathComponent(fileName)
+        let host = placed.flatMap { DownloadSource.hosts(at: $0).first }
+        let entry = LearningRecord(fileExtension: ext, tokens: tokens, destinationID: destinationID, sampleName: fileName, host: host)
         learning.removeAll {
             $0.fileExtension == ext && $0.destinationID == destinationID && $0.sampleName == fileName
         }

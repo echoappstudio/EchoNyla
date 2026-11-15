@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Synchronization
 
 // MARK: - What the Files area shows
 
@@ -18,9 +20,12 @@ public struct BrowserItem: Equatable, Identifiable, Sendable {
     /// "PDF document", from macOS.
     public let kindText: String
     public let isScreenshot: Bool
+    /// Its Finder tags ("Red", "Work"), in Finder's order.
+    public let tags: [String]
 
     public init(path: String, name: String? = nil, isFolder: Bool = false, byteCount: Int64? = nil, modified: Date? = nil,
-                created: Date? = nil, added: Date? = nil, lastOpened: Date? = nil, kindText: String = "", isScreenshot: Bool = false) {
+                created: Date? = nil, added: Date? = nil, lastOpened: Date? = nil, kindText: String = "", isScreenshot: Bool = false,
+                tags: [String] = []) {
         self.path = path
         self.name = name ?? URL(fileURLWithPath: path).lastPathComponent
         self.isFolder = isFolder
@@ -31,6 +36,7 @@ public struct BrowserItem: Equatable, Identifiable, Sendable {
         self.lastOpened = lastOpened
         self.kindText = kindText
         self.isScreenshot = isScreenshot
+        self.tags = tags
     }
 
     public var url: URL { URL(fileURLWithPath: path, isDirectory: isFolder) }
@@ -253,12 +259,8 @@ public enum BrowserGroups {
         if days < 30 { return "Previous 30 Days" }
         let year = calendar.component(.year, from: date)
         guard year == calendar.component(.year, from: now) else { return String(year) }
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "MMMM"
-        return formatter.string(from: date)
+        // Month names without a date formatter: making one for every file slowed big folders down.
+        return EnglishMonths.full[calendar.component(.month, from: date) - 1]
     }
 
     private static func ordered(_ items: [BrowserItem], titles: [String], title: (BrowserItem) -> String) -> [BrowserGroup] {
@@ -344,8 +346,10 @@ public enum ExactCopy {
         }
     }
 
-    /// Groups of exact copies among `files` (same size, then every byte compared), each sorted by path.
-    public static func groups(_ files: [URL], fileManager: FileManager = .default) -> [[URL]] {
+    /// Groups of exact copies among `files` (same size, then the same fingerprint, then every byte
+    /// compared), each sorted by path. The fingerprint keeps a folder of thousands of same-size files
+    /// from comparing every file with every other one. `isCancelled` stops early.
+    public static func groups(_ files: [URL], fileManager: FileManager = .default, isCancelled: () -> Bool = { false }) -> [[URL]] {
         let sized = files.compactMap { url -> (path: String, size: Int64)? in
             guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
                   (attributes[.type] as? FileAttributeType) == .typeRegular,
@@ -353,7 +357,11 @@ public enum ExactCopy {
             return (path: url.path, size: size)
         }
         var result: [[URL]] = []
-        for group in DuplicateFinder.sameSize(sized) {
+        for sameSize in DuplicateFinder.sameSize(sized) {
+            if isCancelled() { return [] }
+            // Two files need no fingerprint; more are sorted by one first.
+            let buckets = sameSize.count == 2 ? [sameSize] : Array(Dictionary(grouping: sameSize, by: { fingerprint(of: $0) ?? $0 }).values)
+            for group in buckets where group.count > 1 {
             var left = group.map { URL(fileURLWithPath: $0) }
             while let first = left.first {
                 let rest = left.dropFirst()
@@ -362,8 +370,35 @@ public enum ExactCopy {
                 let matched = Set(matches.map(\.path))
                 left = rest.filter { !matched.contains($0.path) }
             }
+            }
         }
         return result.sorted { $0[0].path < $1[0].path }
+    }
+
+    /// SHA-256 of the whole file, read a megabyte at a time. Only a reason to look: copies are still
+    /// confirmed byte for byte. Nil when the file can't be read (it then only matches itself).
+    static func fingerprint(of path: String) -> String? {
+        // Kept while the file's size and date stay the same, so a folder read again after a rename
+        // doesn't read every file again.
+        let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let key = "\(path)|\(values?.fileSize ?? -1)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        if let known = fingerprints.withLock({ $0[key] }) { return known }
+        guard let print = readFingerprint(of: path) else { return nil }
+        fingerprints.withLock { cache in
+            if cache.count > 50_000 { cache.removeAll() }
+            cache[key] = print
+        }
+        return print
+    }
+
+    private static let fingerprints = Mutex<[String: String]>([:])
+
+    private static func readFingerprint(of path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return "sha256:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -423,12 +458,36 @@ public enum FolderPeek {
         if days <= 0 { return "today" }
         if days == 1 { return "yesterday" }
         if days < 7 { return "\(days) days ago" }
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "MMM d" : "yyyy"
-        return formatter.string(from: date)
+        let year = calendar.component(.year, from: date)
+        guard year == calendar.component(.year, from: now) else { return String(year) }
+        return EnglishMonths.short[calendar.component(.month, from: date) - 1] + " " + String(calendar.component(.day, from: date))
+    }
+}
+
+/// Month names as Finder's English list shows them ("en_US_POSIX"), without a date formatter.
+public enum EnglishMonths {
+    public static let full = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                              "October", "November", "December"]
+    public static let short = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+}
+
+/// What listing a folder asks about each file. Spotlight lookups are slow (one trip to Spotlight per
+/// file), so they're only made when the answer can change what the list shows.
+public enum ListingCheck {
+    /// Image types macOS marks as screen captures.
+    public static let screenshotExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "tif", "tiff"]
+
+    /// Only pictures can be macOS screenshots.
+    public static func mayBeScreenshot(fileName: String) -> Bool {
+        screenshotExtensions.contains(URL(fileURLWithPath: fileName).pathExtension.lowercased())
+    }
+
+    /// "Last opened" only matters for the Untouched flag: a file changed or put here within the
+    /// year is touched whatever Spotlight says, so only older files are looked up.
+    public static func needsLastOpened(modified: Date?, added: Date?, now: Date = Date()) -> Bool {
+        let latest = [modified, added].compactMap { $0 }.max()
+        guard let latest else { return false }
+        return now.timeIntervalSince(latest) > Double(ClutterCheck.untouchedDays) * 86_400
     }
 }
 
@@ -757,5 +816,51 @@ public enum ByteText {
         }
         let rounded = value >= 100 || unit == 0 ? String(format: "%.0f", value) : String(format: "%.1f", value)
         return "\(rounded) \(units[unit])"
+    }
+}
+
+// MARK: - Finder habits
+
+/// A name that isn't taken yet, as Finder makes them: "untitled folder", then "untitled folder 2", 3…
+public enum UniqueName {
+    public static func make(_ base: String, taken: Set<String>) -> String {
+        let lowered = Set(taken.map { $0.lowercased() })
+        guard lowered.contains(base.lowercased()) else { return base }
+        var number = 2
+        while lowered.contains("\(base) \(number)".lowercased()) { number += 1 }
+        return "\(base) \(number)"
+    }
+}
+
+/// Typing a few letters in a list jumps to the first name that starts with them, as in Finder. With
+/// no such name it goes to the first name that would come after them in A to Z order.
+public enum TypeSelect {
+    /// How long a pause starts a new word.
+    public static let pause: TimeInterval = 1.0
+
+    public static func match(_ typed: String, in items: [(id: String, name: String)]) -> String? {
+        let text = typed.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !items.isEmpty else { return nil }
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        let byName = items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if let hit = byName.first(where: { $0.name.range(of: text, options: options.union(.anchored)) != nil }) { return hit.id }
+        return (byName.first { $0.name.localizedStandardCompare(text) == .orderedDescending } ?? byName.last)?.id
+    }
+
+    /// Keys that type a name: letters, digits and punctuation, not controls. Space opens Quick Look,
+    /// except in the middle of typing a name ("acme invoice"), as in Finder.
+    public static func types(_ characters: String, continuing: Bool = false) -> Bool {
+        guard characters.count == 1, let scalar = characters.unicodeScalars.first else { return false }
+        if scalar == " " { return continuing }
+        return CharacterSet.alphanumerics.union(.punctuationCharacters).union(.symbols).contains(scalar)
+    }
+}
+
+/// The part of a name Finder selects for renaming: everything before the extension (all of it for folders).
+public enum RenameSelection {
+    public static func stemLength(of name: String, isFolder: Bool) -> Int {
+        let ns = name as NSString
+        guard !isFolder, !ns.pathExtension.isEmpty, !name.hasPrefix(".") || ns.deletingPathExtension.count > 1 else { return ns.length }
+        return (ns.deletingPathExtension as NSString).length
     }
 }

@@ -8,16 +8,33 @@ APP="dist/EchoNyla.app"
 ICONSET="dist/AppIcon.iconset"
 ICON_OUT="dist/AppIcon-compiled"
 VERIFY_DIR="dist/verify-extracted"
-ZIP="dist/EchoNyla-3.5.0.zip"
+ZIP="dist/EchoNyla-3.6.0.zip"
 SIGNING_REPORT="dist/signing.txt"
 SIGN_MODE="${SIGN_MODE:-adhoc}"
 export SIGN_MODE
 
-swift build -c release --product EchoNyla
+# The extra flags make the compiler write what it knows about EchoNyla's Shortcuts actions
+# (Scripts/app-intents.sh); they go into the app as Metadata.appintents below.
+app_intents_flags=()
+while IFS= read -r flag; do app_intents_flags+=("$flag"); done < <(bash Scripts/app-intents.sh build-flags)
+swift build -c release --product EchoNyla "${app_intents_flags[@]}"
 rm -rf "$APP" "$ICONSET" "$ICON_OUT" "$VERIFY_DIR" "$ZIP" "$ZIP.sha256" "$SIGNING_REPORT" "dist/notarize"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" dist
 cp .build/release/EchoNyla "$APP/Contents/MacOS/EchoNyla"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+
+# swift build stamps the program with its minimum macOS as the SDK version too (Xcode 27 with a
+# macOS 26 minimum gives "minos 26.0, sdk 26.0"). macOS reads that stamp to decide which newer
+# system behaviour an app gets, so stamp the SDK it was really built with, as Xcode does: macOS 27
+# then treats EchoNyla as a macOS 27 app, and macOS 26 still runs it. Signing comes later.
+MIN_MACOS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Resources/Info.plist)"
+SDK_MACOS="$(xcrun --sdk macosx --show-sdk-version)"
+EXECUTABLE="$APP/Contents/MacOS/EchoNyla"
+# The linker signs the program on Apple silicon; drop that signature before changing it.
+if codesign --display "$EXECUTABLE" >/dev/null 2>&1; then codesign --remove-signature "$EXECUTABLE"; fi
+xcrun vtool -set-build-version macos "$MIN_MACOS" "$SDK_MACOS" -replace -output "$EXECUTABLE.stamped" "$EXECUTABLE"
+mv "$EXECUTABLE.stamped" "$EXECUTABLE"
+python3 -I Scripts/build-version.py "$EXECUTABLE" "$MIN_MACOS" "$SDK_MACOS"
 cp Resources/Acknowledgements.txt "$APP/Contents/Resources/Acknowledgements.txt"
 # The Apple Intelligence mark's loops, drawn in the skin's colours in the sidebar card.
 cp Resources/IntelligenceLoops.png "$APP/Contents/Resources/IntelligenceLoops.png"
@@ -103,8 +120,11 @@ expect_plist() {
 plutil -lint "$APP/Contents/Info.plist"
 expect_plist LSUIElement true
 expect_plist LSMinimumSystemVersion 26.0
-expect_plist CFBundleShortVersionString 3.5.0
-expect_plist CFBundleVersion 27
+expect_plist CFBundleShortVersionString 3.6.0
+expect_plist CFBundleVersion 28
+# Finder's Services menu: "Sort with EchoNyla" and "Show in EchoNyla".
+expect_plist "NSServices:0:NSMessage" sortFiles
+expect_plist "NSServices:1:NSMessage" showInFiles
 expect_plist CFBundleIconFile AppIcon
 expect_plist CFBundleIconName AppIcon
 expect_plist SUFeedURL "https://github.com/echoappstudio/EchoNyla/releases/latest/download/appcast.xml"
@@ -114,6 +134,9 @@ test -s "$APP/Contents/Resources/SkinIcons/icon-sky.png"
 test -s "$APP/Contents/Resources/IntelligenceLoops.png"
 test -s "$APP/Contents/Resources/FileTypes/word.png"
 test -s "$APP/Contents/Resources/FileTypes/LICENSE.txt"
+
+# Shortcuts, Siri and Spotlight actions: Contents/Resources/Metadata.appintents, checked.
+bash Scripts/app-intents.sh extract "$APP"
 
 # Signing is the last change to the app; everything after only zips, checks and hashes it.
 bash Scripts/sign-app.sh "$APP"
@@ -148,8 +171,10 @@ expect_plist_in() {
         exit 1
     fi
 }
-expect_plist_in "$EXTRACTED_APP" CFBundleShortVersionString 3.5.0
-expect_plist_in "$EXTRACTED_APP" CFBundleVersion 27
+expect_plist_in "$EXTRACTED_APP" CFBundleShortVersionString 3.6.0
+expect_plist_in "$EXTRACTED_APP" CFBundleVersion 28
+test -s "$EXTRACTED_APP/Contents/Resources/Metadata.appintents/extract.actionsdata"
+python3 -I Scripts/build-version.py "$EXTRACTED_APP/Contents/MacOS/EchoNyla" "$MIN_MACOS" "$SDK_MACOS"
 expect_plist_in "$EXTRACTED_APP" CFBundleIconName AppIcon
 expect_plist_in "$EXTRACTED_APP" SUFeedURL "https://github.com/echoappstudio/EchoNyla/releases/latest/download/appcast.xml"
 plutil -lint "$EXTRACTED_APP/Contents/Info.plist"

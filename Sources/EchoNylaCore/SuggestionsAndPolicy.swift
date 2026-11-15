@@ -70,6 +70,9 @@ public struct LearningRecord: Codable, Equatable, Identifiable {
     public var destinationID: String
     public var updatedAt: Date
     public var sampleName: String?
+    /// The website the file was downloaded from ("acme.com"), when macOS recorded one. Saved data
+    /// from before 3.6.0 has none.
+    public var host: String?
 
     public init(
         id: UUID = UUID(),
@@ -77,7 +80,8 @@ public struct LearningRecord: Codable, Equatable, Identifiable {
         tokens: Set<String>,
         destinationID: String,
         updatedAt: Date = Date(),
-        sampleName: String? = nil
+        sampleName: String? = nil,
+        host: String? = nil
     ) {
         self.id = id
         self.fileExtension = fileExtension.lowercased()
@@ -85,6 +89,69 @@ public struct LearningRecord: Codable, Equatable, Identifiable {
         self.destinationID = destinationID
         self.updatedAt = updatedAt
         self.sampleName = sampleName
+        self.host = host.flatMap(LearnedHost.usable)
+    }
+}
+
+/// Websites good enough to learn from. Mail, cloud drives and file-sharing sites send all kinds of
+/// files, so a download from them says nothing about where it belongs.
+public enum LearnedHost {
+    static let general = ["google.com", "googleusercontent.com", "dropbox.com", "dropboxusercontent.com", "icloud.com",
+                          "icloud-content.com", "wetransfer.com", "we.tl", "live.com", "1drv.ms", "sharepoint.com", "box.com",
+                          "github.com", "githubusercontent.com", "amazonaws.com", "cloudfront.net", "slack.com", "slack-edge.com",
+                          "discordapp.com", "discordapp.net", "discord.com", "outlook.com", "office.com", "yahoo.com", "proton.me",
+                          "mega.nz", "mediafire.com", "apple.com", "akamaihd.net", "fastly.net", "cloudflare.com", "localhost"]
+
+    /// The host if it can be learned from, else nil.
+    public static func usable(_ host: String) -> String? {
+        let clean = host.lowercased().trimmingCharacters(in: .whitespaces)
+        guard clean.contains("."), !clean.isEmpty else { return nil }
+        if general.contains(where: { clean == $0 || clean.hasSuffix("." + $0) }) { return nil }
+        // An address like 192.168.1.4 isn't a website.
+        if clean.allSatisfy({ $0.isNumber || $0 == "." }) { return nil }
+        return clean
+    }
+}
+
+/// "No" to a move EchoNyla made by itself: you undid it. A later file like it (same type and folder,
+/// and a shared name word or the same website) isn't moved there by itself again; it waits for you.
+public struct LearningNo: Codable, Equatable, Sendable {
+    public var destinationID: String
+    public var fileExtension: String
+    public var tokens: Set<String>
+    public var host: String?
+    public var date: Date
+
+    public init(destinationID: String, fileName: String, host: String?, date: Date = Date()) {
+        self.destinationID = destinationID
+        fileExtension = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+        tokens = SuggestionEngine.filenameTokens(fileName)
+        self.host = host.flatMap(LearnedHost.usable)
+        self.date = date
+    }
+
+    /// Added to a reason when a "no" holds a move back.
+    public static let waitNote = " You undid a move like this before, so it waits for you."
+
+    /// True when one of `nos` says not to move this file to `destinationID` by itself.
+    public static func holdsBack(fileName: String, host: String?, destinationID: String, nos: [LearningNo]) -> Bool {
+        let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+        let tokens = SuggestionEngine.filenameTokens(fileName)
+        let site = host.flatMap(LearnedHost.usable)
+        return nos.contains { no in
+            guard no.destinationID == destinationID, no.fileExtension == ext else { return false }
+            if !no.tokens.isDisjoint(with: tokens) { return true }
+            if let site, no.host == site { return true }
+            // A name with no useful words (IMG_1234, document (3)) is held back only by one like it.
+            return tokens.isEmpty && no.tokens.isEmpty && site == nil && no.host == nil
+        }
+    }
+
+    /// A move held back by a "no" waits for you instead; everything else is unchanged.
+    public static func apply(_ decision: AutoMoveDecision, fileName: String, host: String?, nos: [LearningNo]) -> AutoMoveDecision {
+        guard case .move(let destinationID, let reason) = decision,
+              holdsBack(fileName: fileName, host: host, destinationID: destinationID, nos: nos) else { return decision }
+        return .suggest(destinationID: destinationID, reason: reason + waitNote)
     }
 }
 
@@ -109,10 +176,73 @@ public enum SuggestionStrength: String, Codable, Sendable {
 public struct RankedSuggestion: Equatable {
     public let suggestion: DestinationSuggestion
     public let strength: SuggestionStrength
+    /// For a learned pattern: how many of your moves it comes from.
+    public let examples: Int
 
-    public init(suggestion: DestinationSuggestion, strength: SuggestionStrength) {
+    public init(suggestion: DestinationSuggestion, strength: SuggestionStrength, examples: Int = 0) {
         self.suggestion = suggestion
         self.strength = strength
+        self.examples = examples
+    }
+
+    public var why: SuggestionWhy {
+        switch strength {
+        case .rule: return SuggestionWhy(label: "Your rule", detail: suggestion.reason)
+        case .screenshot: return SuggestionWhy(label: "Screenshot", detail: suggestion.reason)
+        case .learned:
+            return SuggestionWhy(label: examples > 0 ? "Learned from \(examples) moves" : "Learned", detail: suggestion.reason)
+        case .wording: return SuggestionWhy(label: "Name match", detail: suggestion.reason + ". This is only a hint, so EchoNyla never moves the file by itself.")
+        }
+    }
+}
+
+/// A short tag saying where a suggestion came from ("Your rule", "Learned from 4 moves"), with the
+/// full reason for its tooltip.
+public struct SuggestionWhy: Equatable, Sendable {
+    public let label: String
+    public let detail: String
+
+    public init(label: String, detail: String) {
+        self.label = label
+        self.detail = detail
+    }
+
+    public static func appleIntelligence(reason: String?, isSure: Bool) -> SuggestionWhy {
+        let said = reason.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        let base = said.map { "Apple Intelligence: \($0)" } ?? "Apple Intelligence read the file."
+        return SuggestionWhy(label: "Apple Intelligence",
+                             detail: base + (isSure ? "" : " It isn't sure, so the file waits for you."))
+    }
+
+    /// The tag for a reason EchoNyla wrote earlier (Activity, Clean Up, Deep Reorganize). Nil for
+    /// reasons that aren't a suggestion (your own choice, a file it couldn't read).
+    public static func from(reason: String) -> SuggestionWhy? {
+        var text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let held = text.hasSuffix(LearningNo.waitNote.trimmingCharacters(in: .whitespaces))
+        if held {
+            text = String(text.dropLast(LearningNo.waitNote.trimmingCharacters(in: .whitespaces).count))
+                .trimmingCharacters(in: .whitespaces)
+        }
+        guard let found = plain(text) else { return nil }
+        return held ? SuggestionWhy(label: found.label, detail: reason) : found
+    }
+
+    private static func plain(_ text: String) -> SuggestionWhy? {
+        if text.hasPrefix("Downloaded from "), text.contains(" files you moved there") {
+            let count = text.components(separatedBy: "like ").last?.split(whereSeparator: { !$0.isNumber }).first.flatMap { Int($0) }
+            return SuggestionWhy(label: count.map { "Learned from \($0) moves" } ?? "Learned", detail: text)
+        }
+        if text.hasPrefix("Matches your "), text.hasSuffix(" rule") { return SuggestionWhy(label: "Your rule", detail: text) }
+        if text.hasPrefix("Similar to files you moved before") {
+            let count = text.split(whereSeparator: { !$0.isNumber }).first.flatMap { Int($0) }
+            return SuggestionWhy(label: count.map { "Learned from \($0) moves" } ?? "Learned", detail: text)
+        }
+        if text == "Filename matches macOS screenshot naming" || text == "macOS marks this as a screen capture" {
+            return SuggestionWhy(label: "Screenshot", detail: text)
+        }
+        if text.hasPrefix("Matches "), text.hasSuffix(" wording") { return SuggestionWhy(label: "Name match", detail: text) }
+        if text.hasPrefix("Apple Intelligence: ") { return SuggestionWhy(label: "Apple Intelligence", detail: text) }
+        return nil
     }
 }
 
@@ -138,10 +268,11 @@ public enum SuggestionEngine {
         destinations: [Destination],
         rules: [DestinationRule],
         learning: [LearningRecord],
-        isScreenCapture: Bool = false
+        isScreenCapture: Bool = false,
+        sourceHost: String? = nil
     ) -> DestinationSuggestion? {
         suggestRanked(fileName: fileName, destinations: destinations, rules: rules, learning: learning,
-                      isScreenCapture: isScreenCapture)?.suggestion
+                      isScreenCapture: isScreenCapture, sourceHost: sourceHost)?.suggestion
     }
 
     /// Folders that an enabled rule targets. Nothing else (learning, wording, Apple Intelligence)
@@ -156,7 +287,8 @@ public enum SuggestionEngine {
         destinations: [Destination],
         rules: [DestinationRule],
         learning: [LearningRecord],
-        isScreenCapture: Bool = false
+        isScreenCapture: Bool = false,
+        sourceHost: String? = nil
     ) -> RankedSuggestion? {
         guard !destinations.isEmpty else { return nil }
         let extensionName = URL(fileURLWithPath: fileName).pathExtension.lowercased()
@@ -212,7 +344,23 @@ public enum SuggestionEngine {
                     destinationID: learnedMatch.0,
                     reason: "Similar to files you moved before (\(learnedMatch.1) examples)"
                 ),
-                strength: .learned)
+                strength: .learned, examples: learnedMatch.1)
+        }
+
+        // Files from the same website: 3 different ones you moved to the same folder.
+        if let site = sourceHost.flatMap(LearnedHost.usable), !extensionName.isEmpty {
+            let fromSite = Dictionary(grouping: learning.filter { record in
+                availableIDs.contains(record.destinationID) && !lockedDestinationIDs.contains(record.destinationID)
+                    && record.host == site && record.fileExtension == extensionName && record.sampleName != nil
+            }, by: \.destinationID).mapValues { Set($0.compactMap { $0.sampleName?.lowercased() }).count }
+            // Only when one folder clearly has them: files from one site that went to two folders say nothing.
+            let strong = fromSite.filter { $0.value >= 3 }
+            if strong.count == 1, fromSite.count == 1, let match = strong.first {
+                return RankedSuggestion(
+                    suggestion: DestinationSuggestion(destinationID: match.key,
+                                                      reason: "Downloaded from \(site), like \(match.value) files you moved there"),
+                    strength: .learned, examples: match.value)
+            }
         }
 
         return builtInSuggestion(

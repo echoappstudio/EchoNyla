@@ -12,31 +12,30 @@ struct SearchResult: Identifiable, Equatable {
     var reason = ""
 }
 
-/// Set once a search has delivered its results.
-private final class SearchState {
-    var finished = false
-}
-
 /// Runs a Spotlight query in your home folder (the index Finder search uses), or in one folder and
-/// the folders inside it, and returns up to `limit` files, newest first.
+/// the folders inside it, and returns up to `limit` files, newest first. Starting a new search ends
+/// the one before it with no results, so a search typed over another never waits forever.
 @MainActor
 final class FileSearcher {
     private var query: NSMetadataQuery?
     private var observer: NSObjectProtocol?
+    /// The search still waiting for Spotlight, answered by `finish` exactly once.
+    private var waiting: CheckedContinuation<[SearchResult], Never>?
 
     func run(_ queryString: String, in scope: URL? = nil, limit: Int = 60) async -> [SearchResult] {
         stop()
         guard let predicate = NSPredicate(fromMetadataQueryString: queryString) else { return [] }
         return await withCheckedContinuation { continuation in
+            waiting = continuation
             let query = NSMetadataQuery()
             query.predicate = predicate
             query.searchScopes = scope.map { [$0] } ?? [NSMetadataQueryUserHomeScope]
             query.sortDescriptors = [NSSortDescriptor(key: NSMetadataItemFSContentChangeDateKey, ascending: false)]
-            let state = SearchState()
+            let thisQuery = ObjectIdentifier(query)
             observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard !state.finished else { return }
-                    state.finished = true
+                    // Only the search still running answers (an older one was stopped).
+                    guard let self, let query = self.query, ObjectIdentifier(query) == thisQuery else { return }
                     query.disableUpdates()
                     var results: [SearchResult] = []
                     for index in 0..<min(query.resultCount, limit) {
@@ -47,24 +46,23 @@ final class FileSearcher {
                         let date = item.value(forAttribute: NSMetadataItemFSContentChangeDateKey) as? Date
                         results.append(SearchResult(url: url, name: name, modified: date))
                     }
-                    self?.stop()
-                    continuation.resume(returning: results)
+                    self.stop(answering: results)
                 }
             }
             self.query = query
-            if !query.start() {
-                state.finished = true
-                stop()
-                continuation.resume(returning: [])
-            }
+            if !query.start() { stop() }
         }
     }
 
-    private func stop() {
+    /// Ends the current search; whoever is still waiting for it gets `results` (none when it was replaced).
+    private func stop(answering results: [SearchResult] = []) {
         query?.stop()
         query = nil
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
+        let continuation = waiting
+        waiting = nil
+        continuation?.resume(returning: results)
     }
 }
 
@@ -128,7 +126,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                 default: StatusItemController.shared.showPanel()
                 }
             }
-            completionHandler()
         }
+        // The click is handled on the main thread above; macOS only needs to hear it arrived.
+        completionHandler()
     }
 }

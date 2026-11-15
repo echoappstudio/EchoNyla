@@ -351,6 +351,7 @@ struct PendingCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let why = SuggestionWhy.from(reason: reason) { WhyChip(why: why) }
                 }
                 if let summary = pending.summary, !summary.isEmpty {
                     Caption(summary)

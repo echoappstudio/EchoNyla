@@ -15,9 +15,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.5.0</string>
+    <string>3.6.0</string>
     <key>CFBundleVersion</key>
-    <string>27</string>
+    <string>28</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
@@ -50,6 +50,43 @@
     <true/>
     <key>SUVerifyUpdateBeforeExtraction</key>
     <true/>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Sort with EchoNyla</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>sortFiles</string>
+            <key>NSPortName</key>
+            <string>EchoNyla</string>
+            <key>NSRequiredContext</key>
+            <dict/>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.item</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Show in EchoNyla</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>showInFiles</string>
+            <key>NSPortName</key>
+            <string>EchoNyla</string>
+            <key>NSRequiredContext</key>
+            <dict/>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.item</string>
+            </array>
+        </dict>
+    </array>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>EchoNyla listens to the first minute of voice memos, recordings and videos to give them a clear name. It happens on this Mac; nothing is uploaded.</string>
 </dict>

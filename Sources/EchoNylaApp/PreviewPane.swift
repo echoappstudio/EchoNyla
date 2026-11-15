@@ -227,12 +227,18 @@ struct PreviewPaneContent: View {
                     }
                 }
                 if let suggestion {
-                    HStack(spacing: 8) {
-                        Label(suggestion.folderName + (suggestion.isSure ? "" : " (a guess)"), systemImage: "folder")
-                            .font(.system(size: 12.5, weight: .medium))
-                        Spacer()
-                        Button("Move") { model.moveItems([url], toFavorite: suggestion.destinationID) }
-                            .buttonStyle(.pill)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Label(suggestion.folderName + (suggestion.isSure ? "" : " (a guess)"), systemImage: "folder")
+                                .font(.system(size: 12.5, weight: .medium))
+                            Spacer()
+                            Button("Move") { model.moveItems([url], toFavorite: suggestion.destinationID) }
+                                .buttonStyle(.pill)
+                        }
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            WhyChip(why: suggestion.why)
+                            Caption(suggestion.why.detail)
+                        }
                     }
                 }
             }
@@ -288,6 +294,18 @@ struct PreviewPaneContent: View {
         if let details {
             PaneSection("Details") {
                 detailRow("Kind", details.kindText)
+                if !details.tags.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Tags")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 74, alignment: .leading)
+                        TagDots(tags: details.tags)
+                        Text(details.tags.joined(separator: ", "))
+                            .font(.system(size: 11.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if let size = details.byteCount, !details.isFolder { detailRow("Size", ByteText.text(size)) }
                 if let date = details.created { detailRow("Created", date.formatted(date: .abbreviated, time: .shortened)) }
                 if let date = details.modified { detailRow("Modified", date.formatted(date: .abbreviated, time: .shortened)) }
@@ -358,7 +376,7 @@ struct FolderThumbnails: View {
     @State private var files: [URL] = []
     @State private var pictures: [URL: NSImage] = [:]
 
-    static let limit = 12
+    nonisolated static let limit = 12
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], spacing: 6) {

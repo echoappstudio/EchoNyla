@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
@@ -27,6 +27,6 @@ let package = Package(
             ]
         ),
         .testTarget(name: "EchoNylaCoreTests", dependencies: ["EchoNylaCore"])
-    ],
-    swiftLanguageModes: [.v5]
+    ]
+    // Swift 6 language mode (the default for this tools version): data-race checks are errors.
 )

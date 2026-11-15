@@ -41,14 +41,14 @@ public enum AutoMovePolicy {
         if let ai, let destinationID = ai.destinationID, !locked.contains(destinationID) {
             if let local, local.suggestion.destinationID != destinationID {
                 // Two different answers: let the person decide.
-                return .suggest(destinationID: destinationID, reason: ai.reason)
+                return .suggest(destinationID: destinationID, reason: "Apple Intelligence: \(ai.reason)")
             }
             let agreesWithLocal = local?.suggestion.destinationID == destinationID
             let backed = aiHadContentEvidence || agreesWithLocal
             if autoMoveEnabled, ai.isConfident, backed {
                 return .move(destinationID: destinationID, reason: "Apple Intelligence: \(ai.reason)")
             }
-            return .suggest(destinationID: destinationID, reason: ai.reason)
+            return .suggest(destinationID: destinationID, reason: "Apple Intelligence: \(ai.reason)")
         }
         if let local {
             return .suggest(destinationID: local.suggestion.destinationID, reason: local.suggestion.reason)
@@ -89,6 +89,9 @@ public struct FolderWatchState: Sendable {
     public private(set) var departed: [FileSnapshot] = []
 
     public init() {}
+
+    /// A new file is still waiting to stop changing.
+    public var isSettling: Bool { tracked.values.contains { !$0.handled } }
 
     /// The first look at the folder: everything already there counts as handled.
     public mutating func baseline(_ files: [FileSnapshot], now: Date) {
@@ -191,5 +194,17 @@ public struct ActivityEntry: Codable, Equatable, Identifiable, Sendable {
         var result = list.filter { !(entry.kind == .suggested && $0.kind == .suggested && $0.filePath == entry.filePath) }
         result.insert(entry, at: 0)
         return Array(result.prefix(limit))
+    }
+}
+
+/// How often watched folders are looked at. macOS says when a file arrives or leaves, so the
+/// folders are only checked often while a new file is still being written (it must stop changing
+/// for 20 seconds); otherwise a check a minute is only a backstop.
+public enum WatchPace {
+    public static let settling: TimeInterval = 4
+    public static let quiet: TimeInterval = 60
+
+    public static func nextCheck(isSettling: Bool) -> TimeInterval {
+        isSettling ? settling : quiet
     }
 }

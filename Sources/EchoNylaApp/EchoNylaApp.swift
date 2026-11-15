@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SkinStore.shared.start()
         StatusItemController.shared.install()
         AppModel.shared.start()
+        NylaActions.register()
         UpdateController.shared.start()
         let defaults = UserDefaults.standard
         if !defaults.bool(forKey: AppModel.Keys.hasLaunched) {

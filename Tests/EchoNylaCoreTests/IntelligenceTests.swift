@@ -225,11 +225,11 @@ final class AutoMoveTests: XCTestCase {
             AutoMovePolicy.decide(fileName: "a.pdf", local: local, ai: answer, aiHadContentEvidence: evidence, autoMoveEnabled: true, locked: locked)
         }
         XCTAssertEqual(decide(nil, ai("taxes", sure: true), evidence: true), .move(destinationID: "taxes", reason: "Apple Intelligence: ai reason"))
-        XCTAssertEqual(decide(nil, ai("taxes", sure: true), evidence: false), .suggest(destinationID: "taxes", reason: "ai reason"))
-        XCTAssertEqual(decide(nil, ai("taxes", sure: false), evidence: true), .suggest(destinationID: "taxes", reason: "ai reason"))
+        XCTAssertEqual(decide(nil, ai("taxes", sure: true), evidence: false), .suggest(destinationID: "taxes", reason: "Apple Intelligence: ai reason"))
+        XCTAssertEqual(decide(nil, ai("taxes", sure: false), evidence: true), .suggest(destinationID: "taxes", reason: "Apple Intelligence: ai reason"))
         XCTAssertEqual(decide(ranked("taxes", .wording), ai("taxes", sure: true), evidence: false),
                        .move(destinationID: "taxes", reason: "Apple Intelligence: ai reason"))
-        XCTAssertEqual(decide(ranked("bills", .wording), ai("taxes", sure: true), evidence: true), .suggest(destinationID: "taxes", reason: "ai reason"))
+        XCTAssertEqual(decide(ranked("bills", .wording), ai("taxes", sure: true), evidence: true), .suggest(destinationID: "taxes", reason: "Apple Intelligence: ai reason"))
         XCTAssertEqual(decide(nil, ai("taxes", sure: true), evidence: true, locked: ["taxes"]),
                        .suggest(destinationID: nil, reason: "No confident match. Choose a folder."))
         XCTAssertEqual(decide(nil, ai(nil, sure: false), evidence: true), .suggest(destinationID: nil, reason: "No confident match. Choose a folder."))

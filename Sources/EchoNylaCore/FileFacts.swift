@@ -113,6 +113,18 @@ public struct FileFacts: Equatable, Sendable {
 }
 
 public enum TextTools {
+    /// True when the text has the "#####" EchoNyla puts in place of long numbers.
+    public static func hasNumberMask(_ text: String) -> Bool {
+        text.contains("###")
+    }
+
+    /// The text without "#####" masks (and the spaces or dashes left around them).
+    public static func removeNumberMasks(_ text: String) -> String {
+        guard hasNumberMask(text) else { return text }
+        let cleaned = text.replacingOccurrences(of: #"[\s\-–—_]*#{3,}[\s\-–—_]*"#, with: " ", options: .regularExpression)
+        return cleaned.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
     /// Replaces runs of 5 or more digits with # signs, so account and card numbers never reach the model.
     public static func redactLongNumbers(_ text: String, minimumRun: Int = 5) -> String {
         var result = ""

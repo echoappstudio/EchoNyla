@@ -404,7 +404,10 @@ struct ReorganizeItemRow: View {
                     .lineLimit(1)
                     .truncationMode(.head)
                 if !item.summary.isEmpty { Caption(item.summary) }
-                Caption(item.reason)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if let why = SuggestionWhy.from(reason: item.reason) { WhyChip(why: why) }
+                    Caption(item.reason)
+                }
                 if let proposed = item.proposedName {
                     Toggle("Rename to “\(proposed)”" + (item.nameIsSure ? "" : " (not sure)"), isOn: Binding(
                         get: { item.renameSelected },

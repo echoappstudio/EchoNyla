@@ -5,7 +5,7 @@ import Foundation
 /// Reads Finder/Spotlight's screen-capture flag locally, without opening or uploading file contents.
 public enum ScreenshotMetadata {
     private static let attributeName = "com.apple.metadata:kMDItemIsScreenCapture"
-    private static let spotlightName = "kMDItemIsScreenCapture" as CFString
+    private static var spotlightName: CFString { "kMDItemIsScreenCapture" as CFString }
 
     public static func isScreenCapture(at url: URL) -> Bool {
         if let value = extendedAttributeValue(at: url), value {
